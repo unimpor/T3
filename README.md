@@ -5,6 +5,6 @@ This repository contains the official implementation of $\mathbf{T^3}$ as descri
 
 
 The codebase is currently under preparation.
-We will make the full implementation publicly available by March 15, 2026.
+**We will make the full implementation publicly available by March 15, 2026.**
 
 Thanks for your patience and attention!
