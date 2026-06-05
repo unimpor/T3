@@ -44,7 +44,6 @@ This repository contains the core algorithms, data preprocessing, training and e
 
 ## TODOs
 
-- In our [new work](https://arxiv.org/abs/2603.12109), we identify a unique mechanism, **information self-locking**, under multi-turn agentic reasoning and propose AREW to fix that. The corresponding code will be merged into this repository in a future update.
 - We have applied T3 and AREW to tau2-bench and release the code and results in this repo. Refer to this section: [Applicability to General Agentic Scenarios](#applicability-to-general-agentic-scenarios). Results on the effectiveness of T3 and AREW over Deep-Research and SWE settings will be released.
 
 ## Table of Contents
