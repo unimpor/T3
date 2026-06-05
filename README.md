@@ -1,26 +1,41 @@
-# (ICLR 2026 Oral) Reducing Belief Deviation in Reinforcement Learning for Active Reasoning of LLM Agents 
+# (ICLR'26 Oral + ICML'26) Learning to Seek and Use Information: Active Reasoning under Partial Observability
 
 <p align="center">
+  <strong>T3 · ICLR 2026 Oral</strong><br>
   <a href="https://arxiv.org/abs/2510.12264">
     <img src="https://img.shields.io/badge/arXiv-T3-b31b1b?logo=arxiv&style=flat-square" />
-  </a>
-  <a href="https://arxiv.org/abs/2603.12109">
-    <img src="https://img.shields.io/badge/arXiv-AREW-b31b1b?logo=arxiv&style=flat-square" />
   </a>
   <a href="https://huggingface.co/datasets/WorkingOut/T3_data">
     <img src="https://img.shields.io/badge/HuggingFace-T3_Data-FFD21E?logo=huggingface&style=flat-square" />
   </a>
   <a href="https://x.com/ZouDeyu56610/status/2041531834404852201">
-    <img src="https://img.shields.io/badge/X-Twitter_Post-000000?logo=x&logoColor=white&style=flat-square" />
+    <img src="https://img.shields.io/badge/X-T3_Post-000000?logo=x&logoColor=white&style=flat-square" />
+  </a>
+  <a href="https://www.linkedin.com/feed/update/urn:li:activity:7467929786292596736/">
+    <img src="https://img.shields.io/badge/LinkedIn-T3_Post-0A66C2?logo=linkedin&logoColor=white&style=flat-square" />
   </a>
   <a href="http://xhslink.com/o/9S66Dkjx5t7">
-    <img src="https://img.shields.io/badge/Xiaohongshu-Blog-FF2442?style=flat-square" />
+    <img src="https://img.shields.io/badge/Xiaohongshu-T3_Blog-FF2442?style=flat-square" />
   </a>
 </p>
 
-This repository contains the official implementation of T3 as described in the paper Reducing Belief Deviation in Reinforcement Learning for Active Reasoning of LLM Agents by Deyu Zou, Yongqiang Chen, Jianxiang Wang, Garry YANG, Mufei Li, Qing Da, James Cheng, Pan Li, Yu Gong, which has been selected as **ICLR 2026 Oral Presentation**. 
+<p align="center">
+  <strong>AREW · ICML 2026</strong><br>
+  <a href="https://arxiv.org/abs/2603.12109">
+    <img src="https://img.shields.io/badge/arXiv-AREW-b31b1b?logo=arxiv&style=flat-square" />
+  </a>
+  <a href="https://x.com/ZouDeyu56610/status/2062907794089791952">
+    <img src="https://img.shields.io/badge/X-AREW_Post-000000?logo=x&logoColor=white&style=flat-square" />
+  </a>
+  <a href="https://www.linkedin.com/feed/update/urn:li:activity:7467933746076221441/">
+    <img src="https://img.shields.io/badge/LinkedIn-AREW_Post-0A66C2?logo=linkedin&logoColor=white&style=flat-square" />
+  </a>
+</p>
+This repository is a unified codebase for our research line on **learning to seek and use information under partial observatory** in LLM agents. It includes the official implementations of **T3** (*Reducing Belief Deviation in Reinforcement Learning for Active Reasoning of LLM Agents*, **ICLR 2026 Oral**) and **AREW** (*On Information Self-Locking in Reinforcement Learning for Active Reasoning of LLM Agents*, **ICML 2026**).
 
-This repository contains code for the core T3 method, preprocessing, training/evaluation pipelines and scripts, and experiment setups from the paper. We have been **continuously extending this repository to support more general, popular, and realistic agentic scenarios**, so that T3 can be studied in broader interactive reasoning settings. 
+The two works address a shared problem: in long-horizon interactive reasoning, LLM agents must actively acquire information and maintain an accurate belief state. However, standard outcome-based RL often provides too little structure to learn these coupled abilities. T3 studies how belief deviation can make later trajectory segments uninformative or even harmful for learning, while AREW studies how action selection and belief tracking can mutually mask each other’s learning signal, leading to information self-locking.
+
+This repository contains the core algorithms, data preprocessing, training and evaluation pipelines, and experimental setups for both methods. Beyond reproducing the original papers, we are extending the codebase into a broader platform for studying RL-trained LLM agents in realistic active reasoning, tool-use, and deep-research environments.
 
 ![](./figs/main.png)
 
