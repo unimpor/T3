@@ -1,4 +1,4 @@
-# (ICLR'26 Oral + ICML'26) Learning to Seek and Use Information: Active Reasoning under Partial Observability
+# (ICLR'26 Oral + ICML'26) Learning to Seek and Use Information: Agentic Active Reasoning under Partial Observability
 
 <p align="center">
   <strong>T3 · ICLR 2026 Oral</strong><br>
