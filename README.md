@@ -31,9 +31,12 @@
     <img src="https://img.shields.io/badge/LinkedIn-AREW_Post-0A66C2?logo=linkedin&logoColor=white&style=flat-square" />
   </a>
 </p>
-This repository is a unified codebase for our research line on **learning to seek and use information under partial observatory** in LLM agents. It includes the official implementations of **T3** (*Reducing Belief Deviation in Reinforcement Learning for Active Reasoning of LLM Agents*, **ICLR 2026 Oral**) and **AREW** (*On Information Self-Locking in Reinforcement Learning for Active Reasoning of LLM Agents*, **ICML 2026**).
+
+This repository is a unified codebase for our research line on **learning to seek and use information under partial observatory** in LLM agents. It includes the official implementations of **T3** (Reducing Belief Deviation in Reinforcement Learning for Active Reasoning of LLM Agents, **ICLR 2026 Oral**) and **AREW** (On Information Self-Locking in Reinforcement Learning for Active Reasoning of LLM Agents, **ICML 2026**).
+
 
 The two works address a shared problem: in long-horizon interactive reasoning, LLM agents must actively acquire information and maintain an accurate belief state. However, standard outcome-based RL often provides too little structure to learn these coupled abilities. T3 studies how belief deviation can make later trajectory segments uninformative or even harmful for learning, while AREW studies how action selection and belief tracking can mutually mask each other’s learning signal, leading to information self-locking.
+
 
 This repository contains the core algorithms, data preprocessing, training and evaluation pipelines, and experimental setups for both methods. Beyond reproducing the original papers, we are extending the codebase into a broader platform for studying RL-trained LLM agents in realistic active reasoning, tool-use, and deep-research environments.
 
