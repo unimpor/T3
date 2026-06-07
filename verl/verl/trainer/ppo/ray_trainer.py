@@ -164,7 +164,8 @@ def compute_data_metrics_(batch, use_critic=True):
         metrics['env/finish_ratio'] = 1 - float(np.array(batch.meta_info['active_mask'], dtype=np.int16).mean())
     if 'valid_action_stats' in batch.meta_info:
         metrics['env/number_of_valid_action'] = float(np.array(batch.meta_info['valid_action_stats'], dtype=np.int16).mean())
-        metrics['env/ratio_of_valid_action'] = float((np.array(batch.meta_info['valid_action_stats'], dtype=np.int16) / np.array(batch.meta_info['turns_stats'], dtype=np.int16)).mean())
+        turns = np.maximum(np.array(batch.meta_info['turns_stats'], dtype=np.float32), 1.0)
+        metrics['env/ratio_of_valid_action'] = float((np.array(batch.meta_info['valid_action_stats'], dtype=np.float32) / turns).mean())
     if 'valid_search_stats' in batch.meta_info:
         metrics['env/number_of_valid_search'] = float(np.array(batch.meta_info['valid_search_stats'], dtype=np.int16).mean())
     for itm in ['early_cut', 'repeats', 'stalling', 'must_stop']:
@@ -181,6 +182,47 @@ def compute_data_metrics_(batch, use_critic=True):
     for itm in ['tau2_positive_steps', 'tau2_neutral_steps', 'tau2_negative_steps']:
         if itm in batch.meta_info:
             metrics[f'env/{itm}'] = float(np.array(batch.meta_info[itm], dtype=np.float32).mean())
+    for itm in ['tau2_arew_positive_steps', 'tau2_arew_neutral_steps', 'tau2_arew_negative_steps']:
+        if itm in batch.meta_info:
+            metrics[f'env/{itm}'] = float(np.array(batch.meta_info[itm], dtype=np.float32).mean())
+    if 'tau2_arew_has_pos_neg' in batch.meta_info:
+        metrics['env/tau2_arew_pos_neg_trajectory_ratio'] = float(
+            np.array(batch.meta_info['tau2_arew_has_pos_neg'], dtype=np.float32).mean()
+        )
+    for itm in [
+        'tau2_message_turns',
+        'tau2_tool_turns',
+        'tau2_read_tool_turns',
+        'tau2_write_tool_turns',
+        'tau2_user_tool_hops',
+        'tau2_bootstrap_user_tool_hops',
+        'tau2_user_disconnects',
+        'tau2_bootstrap_user_disconnects',
+        'tau2_disconnect_repeat_neutral_steps',
+        'tau2_assistant_tool_errors',
+        'tau2_user_tool_errors',
+        'tau2_state_changed_steps',
+        'tau2_action_progress_steps',
+        'tau2_new_raw_information_steps',
+        'tau2_new_normalized_information_steps',
+        'tau2_new_family_steps',
+        'tau2_max_no_progress_streak',
+        'tau2_t3_truncation_turn',
+        'tau2_user_stopped',
+    ]:
+        if itm in batch.meta_info:
+            metrics[f'env/{itm}'] = float(np.array(batch.meta_info[itm], dtype=np.float32).mean())
+    if 'turns_stats' in batch.meta_info:
+        turns_stats = np.array(batch.meta_info['turns_stats'], dtype=np.float32)
+        if 'tau2_arew_positive_steps' in batch.meta_info:
+            values = np.array(batch.meta_info['tau2_arew_positive_steps'], dtype=np.float32)
+            metrics['env/tau2_arew_positive_step_ratio'] = float((values / np.maximum(turns_stats, 1.0)).mean())
+        if 'tau2_arew_neutral_steps' in batch.meta_info:
+            values = np.array(batch.meta_info['tau2_arew_neutral_steps'], dtype=np.float32)
+            metrics['env/tau2_arew_neutral_step_ratio'] = float((values / np.maximum(turns_stats, 1.0)).mean())
+        if 'tau2_arew_negative_steps' in batch.meta_info:
+            values = np.array(batch.meta_info['tau2_arew_negative_steps'], dtype=np.float32)
+            metrics['env/tau2_arew_negative_step_ratio'] = float((values / np.maximum(turns_stats, 1.0)).mean())
     if "arew_spos" in batch.batch:
         metrics["arew/spos_mean"] = float(batch.batch["arew_spos"].float().mean().item())
     if "arew_sneg" in batch.batch:
@@ -189,6 +231,33 @@ def compute_data_metrics_(batch, use_critic=True):
         metrics["arew/pos_step_count_mean"] = float(batch.batch["arew_pos_steps"].float().mean().item())
     if "arew_neg_steps" in batch.batch:
         metrics["arew/neg_step_count_mean"] = float(batch.batch["arew_neg_steps"].float().mean().item())
+    if "arew_raw_pos_steps" in batch.batch:
+        metrics["arew/raw_pos_step_count_mean"] = float(batch.batch["arew_raw_pos_steps"].float().mean().item())
+    if "arew_raw_neg_steps" in batch.batch:
+        metrics["arew/raw_neg_step_count_mean"] = float(batch.batch["arew_raw_neg_steps"].float().mean().item())
+    if "arew_eff_pos_steps" in batch.batch:
+        metrics["arew/effective_pos_step_count_mean"] = float(batch.batch["arew_eff_pos_steps"].float().mean().item())
+    if "arew_eff_neg_steps" in batch.batch:
+        metrics["arew/effective_neg_step_count_mean"] = float(batch.batch["arew_eff_neg_steps"].float().mean().item())
+    if "arew_raw_pos_steps" in batch.batch and "arew_raw_neg_steps" in batch.batch:
+        raw_pos_steps = batch.batch["arew_raw_pos_steps"]
+        raw_neg_steps = batch.batch["arew_raw_neg_steps"]
+        metrics["arew/raw_both_sided_ratio"] = float(((raw_pos_steps > 0) & (raw_neg_steps > 0)).float().mean().item())
+        metrics["arew/raw_pos_only_ratio"] = float(((raw_pos_steps > 0) & (raw_neg_steps == 0)).float().mean().item())
+        metrics["arew/raw_neg_only_ratio"] = float(((raw_pos_steps == 0) & (raw_neg_steps > 0)).float().mean().item())
+    if "arew_eff_pos_steps" in batch.batch and "arew_eff_neg_steps" in batch.batch:
+        eff_pos_steps = batch.batch["arew_eff_pos_steps"]
+        eff_neg_steps = batch.batch["arew_eff_neg_steps"]
+        metrics["arew/effective_active_ratio"] = float(((eff_pos_steps > 0) | (eff_neg_steps > 0)).float().mean().item())
+        metrics["arew/effective_both_sided_ratio"] = float(
+            ((eff_pos_steps > 0) & (eff_neg_steps > 0)).float().mean().item()
+        )
+        metrics["arew/effective_pos_only_ratio"] = float(
+            ((eff_pos_steps > 0) & (eff_neg_steps == 0)).float().mean().item()
+        )
+        metrics["arew/effective_neg_only_ratio"] = float(
+            ((eff_pos_steps == 0) & (eff_neg_steps > 0)).float().mean().item()
+        )
     return metrics
 
 
@@ -242,8 +311,19 @@ def get_arew_modifier(
     advantages: torch.Tensor,
     config: Optional[AlgoConfig],
     step_ids: Optional[torch.Tensor] = None,
+    complementary_neutral_mask: Optional[torch.Tensor] = None,
     eps: float = 1e-12,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """Map token-level {-1,0,+1} labels to a zero-sum advantage bonus."""
     mode = getattr(config, "arew_bonus_mode", "minority_fixed")
     scale = float(getattr(config, "arew_bonus_scale", 0.1))
@@ -264,6 +344,8 @@ def get_arew_modifier(
             neg_step_ids = torch.unique(row_step_ids[bonus_labels[row_idx] < 0])
             pos_step_counts[row_idx] = int((pos_step_ids > 0).sum().item())
             neg_step_counts[row_idx] = int((neg_step_ids > 0).sum().item())
+    raw_pos_step_counts = pos_step_counts.clone()
+    raw_neg_step_counts = neg_step_counts.clone()
 
     s_pos_f = s_pos.to(advantages.dtype)
     s_neg_f = s_neg.to(advantages.dtype)
@@ -296,12 +378,17 @@ def get_arew_modifier(
     elif mode == "step_abs_sum":
         if step_ids is None:
             raise ValueError("AREW mode=step_abs_sum requires responses_arew_step_ids in batch.")
+        if complementary_neutral_mask is not None:
+            complementary_neutral_mask = complementary_neutral_mask.to(device=bonus_labels.device).bool()
         if negative_step_mode not in {"full", "prefix", "suffix"}:
             raise ValueError(
                 f"Unknown AREW negative-step mode={negative_step_mode}. Choose from full|prefix|suffix"
             )
         shaped = torch.zeros_like(bonus_labels, dtype=advantages.dtype)
+        selected_s_pos = torch.zeros_like(s_pos)
         selected_s_neg = torch.zeros_like(s_neg)
+        effective_pos_step_counts = torch.zeros_like(pos_step_counts)
+        effective_neg_step_counts = torch.zeros_like(neg_step_counts)
         for row_idx in range(bonus_labels.size(0)):
             row_labels = bonus_labels[row_idx]
             row_step_ids = step_ids[row_idx]
@@ -309,32 +396,92 @@ def get_arew_modifier(
             neg_step_ids = torch.unique(row_step_ids[row_labels < 0])
             pos_step_ids = pos_step_ids[pos_step_ids > 0]
             neg_step_ids = neg_step_ids[neg_step_ids > 0]
-            if pos_step_ids.numel() == 0 or neg_step_ids.numel() == 0:
-                continue
-            if negative_step_mode != "full" and neg_step_ids.numel() > pos_step_ids.numel():
-                keep_n = int(pos_step_ids.numel())
-                if negative_step_mode == "prefix":
-                    neg_step_ids = neg_step_ids[:keep_n]
-                else:
-                    neg_step_ids = neg_step_ids[-keep_n:]
 
-            pos_step_budget = scale / (2.0 * float(pos_step_ids.numel()))
-            neg_step_budget = scale / (2.0 * float(neg_step_ids.numel()))
-            for step_id in pos_step_ids.tolist():
-                step_mask = row_step_ids.eq(step_id) & row_labels.gt(0)
+            positive_step_ids = pos_step_ids
+            negative_step_ids = neg_step_ids
+            synthetic_positive_step_ids = pos_step_ids.new_empty((0,), dtype=pos_step_ids.dtype)
+            synthetic_negative_step_ids = neg_step_ids.new_empty((0,), dtype=neg_step_ids.dtype)
+            positive_on_neutral = False
+            negative_on_neutral = False
+
+            positive_step_id_values = positive_step_ids.tolist()
+            negative_step_id_values = negative_step_ids.tolist()
+            final_step_id = None
+            positive_row_step_ids = row_step_ids[row_step_ids > 0]
+            if positive_row_step_ids.numel() > 0:
+                final_step_id = int(positive_row_step_ids.max().item())
+            neutral_mask = row_labels.eq(0) & row_step_ids.gt(0)
+            if final_step_id is not None:
+                neutral_mask = neutral_mask & row_step_ids.ne(final_step_id)
+            neutral_step_ids = torch.unique(row_step_ids[neutral_mask])
+            neutral_step_ids = neutral_step_ids[neutral_step_ids > 0]
+            complementary_neutral_step_ids = neutral_step_ids
+            if complementary_neutral_mask is not None:
+                complementary_neutral_step_ids = torch.unique(
+                    row_step_ids[neutral_mask & complementary_neutral_mask[row_idx]]
+                )
+                complementary_neutral_step_ids = complementary_neutral_step_ids[complementary_neutral_step_ids > 0]
+
+            if (
+                positive_step_ids.numel() == 0
+                and negative_step_ids.numel() > 0
+                and complementary_neutral_step_ids.numel() > 0
+            ):
+                synthetic_positive_step_ids = complementary_neutral_step_ids
+                positive_on_neutral = True
+            elif negative_step_ids.numel() == 0 and positive_step_ids.numel() > 0 and neutral_step_ids.numel() > 0:
+                synthetic_negative_step_ids = neutral_step_ids
+                negative_on_neutral = True
+
+            effective_positive_step_ids = positive_step_ids if positive_step_ids.numel() > 0 else synthetic_positive_step_ids
+            effective_negative_step_ids = negative_step_ids if negative_step_ids.numel() > 0 else synthetic_negative_step_ids
+            if effective_positive_step_ids.numel() == 0 or effective_negative_step_ids.numel() == 0:
+                continue
+            if negative_step_mode != "full" and effective_negative_step_ids.numel() > effective_positive_step_ids.numel():
+                keep_n = int(effective_positive_step_ids.numel())
+                if negative_step_mode == "prefix":
+                    effective_negative_step_ids = effective_negative_step_ids[:keep_n]
+                else:
+                    effective_negative_step_ids = effective_negative_step_ids[-keep_n:]
+
+            effective_pos_step_counts[row_idx] = int(effective_positive_step_ids.numel())
+            effective_neg_step_counts[row_idx] = int(effective_negative_step_ids.numel())
+
+            pos_step_budget = scale / (2.0 * float(effective_positive_step_ids.numel()))
+            neg_step_budget = scale / (2.0 * float(effective_negative_step_ids.numel()))
+            for step_id in effective_positive_step_ids.tolist():
+                if positive_on_neutral and step_id not in positive_step_id_values:
+                    step_mask = row_step_ids.eq(step_id) & row_labels.eq(0)
+                else:
+                    step_mask = row_step_ids.eq(step_id) & row_labels.gt(0)
                 step_len = int(step_mask.sum().item())
                 if step_len > 0:
                     shaped[row_idx, step_mask] = pos_step_budget / step_len
-            for step_id in neg_step_ids.tolist():
-                step_mask = row_step_ids.eq(step_id) & row_labels.lt(0)
+                    selected_s_pos[row_idx] += step_len
+            for step_id in effective_negative_step_ids.tolist():
+                if negative_on_neutral and step_id not in negative_step_id_values:
+                    step_mask = row_step_ids.eq(step_id) & row_labels.eq(0)
+                else:
+                    step_mask = row_step_ids.eq(step_id) & row_labels.lt(0)
                 step_len = int(step_mask.sum().item())
                 if step_len > 0:
                     shaped[row_idx, step_mask] = -neg_step_budget / step_len
                     selected_s_neg[row_idx] += step_len
-            neg_step_counts[row_idx] = int(neg_step_ids.numel())
-        valid = (s_pos > 0) & (selected_s_neg > 0)
+            pos_step_counts[row_idx] = int(effective_positive_step_ids.numel())
+            neg_step_counts[row_idx] = int(effective_negative_step_ids.numel())
+        valid = (selected_s_pos > 0) & (selected_s_neg > 0)
         shaped = torch.where(valid.unsqueeze(1), shaped, torch.zeros_like(shaped))
-        return shaped.to(advantages.dtype), s_pos, selected_s_neg, pos_step_counts, neg_step_counts
+        return (
+            shaped.to(advantages.dtype),
+            selected_s_pos,
+            selected_s_neg,
+            pos_step_counts,
+            neg_step_counts,
+            raw_pos_step_counts,
+            raw_neg_step_counts,
+            effective_pos_step_counts,
+            effective_neg_step_counts,
+        )
     else:
         raise ValueError(
             f"Unknown AREW mode={mode}. Choose from fixed_pos|fixed_neg|abs_sum|minority_fixed|step_abs_sum"
@@ -347,7 +494,17 @@ def get_arew_modifier(
     shaped = torch.where(is_neg, -neg_bt.expand_as(shaped), shaped)
     shaped = torch.where(valid.unsqueeze(1), shaped, torch.zeros_like(shaped))
 
-    return shaped.to(advantages.dtype), s_pos, s_neg, pos_step_counts, neg_step_counts
+    return (
+        shaped.to(advantages.dtype),
+        s_pos,
+        s_neg,
+        pos_step_counts,
+        neg_step_counts,
+        raw_pos_step_counts,
+        raw_neg_step_counts,
+        pos_step_counts,
+        neg_step_counts,
+    )
 
 
 # def remap_arew_labels(
@@ -432,17 +589,35 @@ def compute_advantage(
             arew_step_ids = data.batch.get("responses_arew_step_ids", None)
             if arew_step_ids is not None:
                 arew_step_ids = arew_step_ids.to(device=advantages.device)
-            modifier, s_pos, s_neg, pos_steps, neg_steps = get_arew_modifier(
+            complementary_neutral_mask = data.batch.get("responses_arew_complementary_mask", None)
+            if complementary_neutral_mask is not None:
+                complementary_neutral_mask = complementary_neutral_mask.to(device=advantages.device)
+            (
+                modifier,
+                s_pos,
+                s_neg,
+                pos_steps,
+                neg_steps,
+                raw_pos_steps,
+                raw_neg_steps,
+                eff_pos_steps,
+                eff_neg_steps,
+            ) = get_arew_modifier(
                 arew_labels,
                 advantages,
                 config,
                 step_ids=arew_step_ids,
+                complementary_neutral_mask=complementary_neutral_mask,
             )
             modifier = modifier * data.batch["response_mask"].to(modifier.dtype)
             data.batch["arew_spos"] = s_pos
             data.batch["arew_sneg"] = s_neg
             data.batch["arew_pos_steps"] = pos_steps
             data.batch["arew_neg_steps"] = neg_steps
+            data.batch["arew_raw_pos_steps"] = raw_pos_steps
+            data.batch["arew_raw_neg_steps"] = raw_neg_steps
+            data.batch["arew_eff_pos_steps"] = eff_pos_steps
+            data.batch["arew_eff_neg_steps"] = eff_neg_steps
             data.batch["advantages"] = advantages + modifier
         else:
             data.batch["advantages"] = advantages
@@ -479,17 +654,35 @@ def compute_advantage(
             arew_step_ids = data.batch.get("responses_arew_step_ids", None)
             if arew_step_ids is not None:
                 arew_step_ids = arew_step_ids.to(device=advantages.device)
-            modifier, s_pos, s_neg, pos_steps, neg_steps = get_arew_modifier(
+            complementary_neutral_mask = data.batch.get("responses_arew_complementary_mask", None)
+            if complementary_neutral_mask is not None:
+                complementary_neutral_mask = complementary_neutral_mask.to(device=advantages.device)
+            (
+                modifier,
+                s_pos,
+                s_neg,
+                pos_steps,
+                neg_steps,
+                raw_pos_steps,
+                raw_neg_steps,
+                eff_pos_steps,
+                eff_neg_steps,
+            ) = get_arew_modifier(
                 arew_labels,
                 advantages,
                 config,
                 step_ids=arew_step_ids,
+                complementary_neutral_mask=complementary_neutral_mask,
             )
             modifier = modifier * data.batch["response_mask"].to(modifier.dtype)
             data.batch["arew_spos"] = s_pos
             data.batch["arew_sneg"] = s_neg
             data.batch["arew_pos_steps"] = pos_steps
             data.batch["arew_neg_steps"] = neg_steps
+            data.batch["arew_raw_pos_steps"] = raw_pos_steps
+            data.batch["arew_raw_neg_steps"] = raw_neg_steps
+            data.batch["arew_eff_pos_steps"] = eff_pos_steps
+            data.batch["arew_eff_neg_steps"] = eff_neg_steps
             data.batch["advantages"] = advantages + modifier
         else:
             data.batch["advantages"] = advantages
@@ -860,6 +1053,11 @@ class RayPPOTrainer:
             trunc_strength = self.config.trunc_strength,
             hard_tolerate_num = OmegaConf.select(self.config, "hard_tolerate_num", default=2),
             strict_progress_label = OmegaConf.select(self.config, "tau2_strict_progress_label", default=False),
+            completion_bonus = OmegaConf.select(self.config, "tau2_completion_bonus", default=0.0),
+            tau2_t3_progress_mode = OmegaConf.select(self.config, "tau2_t3_progress_mode", default="legacy"),
+            tau2_t3_min_turn = OmegaConf.select(self.config, "tau2_t3_min_turn", default=6),
+            tau2_arew_label_mode = OmegaConf.select(self.config, "tau2_arew_label_mode", default="clean"),
+            tau2_arew_min_turn = OmegaConf.select(self.config, "tau2_arew_min_turn", default=8),
         )
 
         # Agent config preparation
@@ -1261,6 +1459,11 @@ class RayPPOTrainer:
             trunc_strength = self.config.trunc_strength,
             hard_tolerate_num = OmegaConf.select(self.config, "hard_tolerate_num", default=2),
             strict_progress_label = OmegaConf.select(self.config, "tau2_strict_progress_label", default=False),
+            completion_bonus = OmegaConf.select(self.config, "tau2_completion_bonus", default=0.0),
+            tau2_t3_progress_mode = OmegaConf.select(self.config, "tau2_t3_progress_mode", default="legacy"),
+            tau2_t3_min_turn = OmegaConf.select(self.config, "tau2_t3_min_turn", default=6),
+            tau2_arew_label_mode = OmegaConf.select(self.config, "tau2_arew_label_mode", default="clean"),
+            tau2_arew_min_turn = OmegaConf.select(self.config, "tau2_arew_min_turn", default=8),
         )
 
         generation_manager = LLMGenerationManager(

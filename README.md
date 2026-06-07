@@ -142,7 +142,7 @@ The script also supports overriding the input path, output path, split sizes, `d
 
 Tau2Bench data is generated from the task definitions under `verl/search_r1/tau2_adapter/`.
 
-Example:
+Solo-mode example:
 
 ```bash
 python3 verl/preprocess/data_process/tau2.py \
@@ -161,6 +161,27 @@ This writes parquet files under:
 ```
 
 If you need filenames aligned with a specific training wrapper, set `--train_output` and `--val_output`, or override `TRAIN_FILE` and `VAL_FILE` when launching training.
+
+Standard-mode example with an LLM-simulated user:
+
+```bash
+python3 verl/preprocess/data_process/tau2.py \
+  --local_dir /path/to/workspace \
+  --domain telecom \
+  --source_split full \
+  --exclude_splits test \
+  --custom_split_name full_minus_test \
+  --train_ratio 0.9 \
+  --seed 42 \
+  --mode standard \
+  --enable_think \
+  --think_mode short
+```
+
+This produces standard-mode files such as:
+
+- `Tau2Bench/telecom/train_full_minus_test_9009_standard_think_short.parquet`
+- `Tau2Bench/telecom/val_full_minus_test_9009_standard_think_short.parquet`
 
 ## Training
 
@@ -208,6 +229,18 @@ bash verl/cmd/tau2/ppo1.1.sh
 - `verl/cmd/tau2/ppo1.1.sh` and related variants for T3-enabled settings
 - `verl/cmd/tau2/ppo1.2.sh` and related variants for AREW-enabled settings
 
+For Tau2Bench standard mode with an LLM-simulated user:
+
+```bash
+export TAU2_STANDARD_USER_API_KEY=...
+export TAU2_STANDARD_USER_AZURE_ENDPOINT=...
+
+bash verl/cmd/tau2s/ppo.sh
+bash verl/cmd/tau2s/ppo_AREW.sh
+```
+
+The `tau2s` scripts default to Qwen2.5-14B-Instruct and the standard telecom think-short parquet files. `ppo.sh` is the vanilla PPO baseline. `ppo_AREW.sh` reproduces the v427 Tau2-standard AREW setup: targeted labels, `step_abs_sum`, `AREW_BONUS_SCALE=50.0`, `tau2_arew_min_turn=6`, and `early_cut=false`.
+
 ## Evaluation and Reproduction
 
 Evaluation is run through the same PPO entry point in validation-only mode, eg,
@@ -224,10 +257,11 @@ T3 is intended to be applicable beyond a single benchmark or environment family.
 
 ### 1. Tau2Bench
 
-We evaluate on Tau2Bench-Telecom, a multi-turn tool-use benchmark where the agent must resolve realistic customer-service tickets by interacting with an environment through API-like tools. In our experiments, we use the solo mode setting, i.e., we disable the LLM-simulated user and let the policy interact directly with the environment/tool interface. 
+We evaluate on Tau2Bench-Telecom, a multi-turn tool-use benchmark where the agent must resolve realistic customer-service tickets by interacting with an environment through API-like tools. The repository includes both the solo mode setting, where the policy interacts directly with the environment/tool interface, and the standard setting, where the policy interacts with an LLM-simulated user while assistant-side tool calls are executed by the backend environment.
 
 For this setting, we derive simple step-level signals directly from the online interaction trace: a step is labeled **positive** if it increases the number of matched expected actions in the benchmark evaluator, negative if it corresponds to an obvious failure such as a tool error, invalid or malformed action, repeated action, or a write that has no effect, and neutral otherwise. AREW uses these labels to perform within-trajectory advantage redistribution. **T3** uses the same signals for trajectory truncation; in our current Tau2Bench setup we use a conservative soft truncation policy with trunc_strength = 8 and set the hard truncation threshold to 999, which effectively disables hard truncation. See details in `verl/search_r1/tau2_adapter`.
 
+For Tau2Bench standard mode, the agent-visible conversation follows the original benchmark semantics: the policy only sees user messages and assistant-side tool observations; hidden user-side tool calls and user-side tool results are used internally by the LLM-simulated user and are not exposed to the policy.
 **Comparing vanilla PPO with PPO equipped with T3**
 
 ![paper image](./figs/tau2-T3.png)

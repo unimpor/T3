@@ -150,3 +150,101 @@ Available tools:
 
 {closing_instruction}
 """
+
+
+_STANDARD_AGENT_INSTRUCTION = """
+You are a customer service agent that helps the user according to the <policy> provided below.
+In each turn you can either:
+- Send a message to the user.
+- Make a tool call.
+You cannot do both at the same time.
+
+Try to be helpful and always follow the policy.
+Only the tools listed in "Available tools" are callable by you.
+If the policy mentions phone-side checks or actions that are not listed in "Available tools", those are user-side actions.
+For user-side actions, ask the user to do them via <message> instead of calling them yourself.
+""".strip()
+
+
+def _build_standard_output_format(enable_think: bool, think_mode: str) -> tuple[str, str]:
+    if not enable_think:
+        output_format = """Output format:
+1. To send a message to the user, respond with:
+<message>Your message to the user</message>
+2. To call exactly one tool, respond with:
+<interact>tool_name(arg1=value1, arg2=value2)</interact>
+
+Rules:
+- Each turn must contain exactly one <message> block or one <interact> block.
+- Do not include tool syntax inside <message>.
+- Do not include plain English outside the XML block.
+- Use valid Python-like keyword arguments inside <interact>.
+"""
+        return output_format, "Wait for the user message and then take the best next action."
+
+    if think_mode != "short":
+        raise ValueError(f"Unsupported think_mode={think_mode}. Only 'short' is currently supported.")
+
+    output_format = """Output format:
+1. To send a message to the user:
+<think>Briefly state the next conversational goal in 1-2 short sentences.</think>
+<message>Your message to the user</message>
+2. To call exactly one tool:
+<think>Briefly state the current blocker and the best next tool.</think>
+<interact>tool_name(arg1=value1, arg2=value2)</interact>
+
+Rules:
+- Keep <think> short and operational.
+- Each turn must contain exactly one <message> block or one <interact> block.
+- Only the tools listed in "Available tools" are callable inside <interact>.
+- Do not include tool syntax inside <message> or <think>.
+- Do not include plain English outside the XML blocks.
+- Use valid Python-like keyword arguments inside <interact>.
+"""
+    return output_format, "Wait for the user message and then take the best next action."
+
+
+def build_standard_system_prompt(
+    task,
+    env: Environment,
+    enable_think: bool = False,
+    think_mode: str = "short",
+) -> str:
+    policy = env.get_policy()
+    tools_desc = _format_tools(task, env)
+    output_format, closing_instruction = _build_standard_output_format(
+        enable_think=enable_think,
+        think_mode=think_mode,
+    )
+    tools_block = f"\nAvailable tools:\n{tools_desc}\n" if tools_desc else ""
+    return f"""<instructions>
+{_STANDARD_AGENT_INSTRUCTION}
+</instructions>
+<policy>
+{policy}
+</policy>
+{tools_block}
+
+{output_format}
+
+{closing_instruction}
+"""
+
+
+def build_standard_prompt_messages(
+    task,
+    env: Environment,
+    enable_think: bool = False,
+    think_mode: str = "short",
+) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": build_standard_system_prompt(
+                task,
+                env,
+                enable_think=enable_think,
+                think_mode=think_mode,
+            ),
+        }
+    ]

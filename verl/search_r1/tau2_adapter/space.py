@@ -12,6 +12,8 @@ from search_r1.tau2_adapter.prompts import build_solo_prompt
 
 
 class Tau2SoloSpace:
+    supports_answer = True
+
     def __init__(
         self,
         controller: dict,
@@ -114,7 +116,8 @@ class Tau2SoloSpace:
         self.invalid_action_count += 1
         self._record_step_label(-1, reason)
 
-    def register_answer(self) -> None:
+    def register_answer(self, answer_text: str | None = None) -> None:
+        del answer_text
         self._record_step_label(0, "answer")
 
     def _update_proxy_state(self, *, progress: bool, hard_bad: bool, reason: str | None, validate: bool) -> bool:
@@ -282,7 +285,8 @@ class Tau2SoloSpace:
         suffix = "Now continue with the next tool call, or finish with <answer>done()</answer>."
         return f"Tool result: {tool_feedback}\n{suffix}"
 
-    def finalize(self):
+    def finalize(self, official: bool = False):
+        del official
         if self.reward_info is not None:
             return self.reward_info
         full_trajectory = [*self.initial_history, *self.trajectory]

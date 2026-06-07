@@ -1,6 +1,6 @@
 from search_r1.tau2_adapter.core.environment import Environment
 from search_r1.tau2_adapter.core.message import AssistantMessage, ToolMessage, UserMessage
-from search_r1.tau2_adapter.core.tasks import Task
+from search_r1.tau2_adapter.core.tasks import RewardType, Task
 from search_r1.tau2_adapter.eval.schema import DBCheck, EnvAssertionCheck, RewardInfo
 
 
@@ -10,6 +10,8 @@ def evaluate_environment(
     full_trajectory: list[AssistantMessage | UserMessage | ToolMessage],
     solo_mode: bool = True,
     env_kwargs: dict | None = None,
+    respect_reward_basis: bool = False,
+    fractional: bool = False,
 ) -> RewardInfo:
     if task.evaluation_criteria is None:
         return RewardInfo(reward=1.0, info={"note": "No evaluation criteria"})
@@ -47,21 +49,45 @@ def evaluate_environment(
     db_check = DBCheck(db_match=db_match, db_reward=db_reward)
 
     env_assertion_checks = []
-    env_assertion_reward = 1.0
+    env_assertion_values = []
     for env_assertion in task.evaluation_criteria.env_assertions or []:
         success = predicted_environment.run_env_assertion(env_assertion, raise_assertion_error=False)
+        reward = 1.0 if success else 0.0
         env_assertion_checks.append(
             EnvAssertionCheck(
                 env_assertion=env_assertion,
                 met=success,
-                reward=1.0 if success else 0.0,
+                reward=reward,
             )
         )
-        env_assertion_reward *= 1.0 if success else 0.0
+        env_assertion_values.append(reward)
+    if fractional:
+        env_assertion_reward = (
+            sum(env_assertion_values) / len(env_assertion_values)
+            if env_assertion_values
+            else 1.0
+        )
+    else:
+        env_assertion_reward = 1.0
+        for value in env_assertion_values:
+            env_assertion_reward *= value
 
-    reward = db_reward
-    reward_breakdown = {"DB": db_reward}
-    if task.evaluation_criteria.env_assertions:
+    reward_basis = {
+        item.value if isinstance(item, RewardType) else str(item)
+        for item in (task.evaluation_criteria.reward_basis if task.evaluation_criteria is not None else [])
+    }
+    include_db = not respect_reward_basis or RewardType.DB.value in reward_basis
+    include_env_assertion = (
+        bool(task.evaluation_criteria.env_assertions)
+        and (not respect_reward_basis or RewardType.ENV_ASSERTION.value in reward_basis)
+    )
+
+    reward = 1.0
+    reward_breakdown = {}
+    if include_db:
+        reward *= db_reward
+        reward_breakdown["DB"] = db_reward
+    if include_env_assertion:
         reward *= env_assertion_reward
         reward_breakdown["ENV_ASSERTION"] = env_assertion_reward
 

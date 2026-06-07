@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import re
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import os
 from typing import List, Dict, Any, Tuple
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from .tensor_helper import TensorHelper, TensorConfig
 from .utils import CircuitDecodingSpace, MovieRecSpace
 from search_r1.tau2_adapter.space import Tau2SoloSpace
+from search_r1.tau2_adapter.standard_space import Tau2StandardSpace
 from verl import DataProto
 
 DATA2KEYS = {
@@ -26,7 +28,51 @@ DATA2KEYS = {
 
 start_user = "\n<|im_start|>user\n"
 start_assistant = "\n<|im_start|>assistant\n"
+start_tool = "\n<|im_start|>tool\n"
 end_signal = "<|im_end|>"
+
+_ROLE_PREFIX = {
+    "user": start_user,
+    "assistant": start_assistant,
+    "tool": start_tool,
+}
+_TAU2_STANDARD_USER_SIM_PARALLELISM = max(1, int(os.getenv("TAU2_STANDARD_USER_SIM_PARALLELISM", "16")))
+
+
+def _normalize_chat_content(content: Any) -> str:
+    return "" if content is None else str(content).strip()
+
+
+def _render_chat_observation(role: str, content: Any) -> str:
+    if role not in _ROLE_PREFIX:
+        raise ValueError(f"Unsupported chat role: {role}")
+    return f"{_ROLE_PREFIX[role]}{_normalize_chat_content(content)}\n{end_signal}{start_assistant}"
+
+
+def _render_standard_bootstrap(turns: List[Tuple[str, str]]) -> str:
+    if not turns:
+        return ""
+
+    first_role, first_content = turns[0]
+    if first_role != "assistant":
+        raise ValueError(f"Standard bootstrap must start with assistant, got role={first_role}")
+
+    chunks = [f"{_normalize_chat_content(first_content)}\n{end_signal}"]
+    for role, content in turns[1:]:
+        if role not in _ROLE_PREFIX:
+            raise ValueError(f"Unsupported bootstrap role: {role}")
+        chunks.append(f"{_ROLE_PREFIX[role]}{_normalize_chat_content(content)}\n{end_signal}")
+    chunks.append(start_assistant)
+    return "".join(chunks)
+
+
+def _truncate_response_to_action(response: str) -> str:
+    closing_tags = ["</answer>", "</interact>", "</message>"]
+    matches = [(response.find(tag), tag) for tag in closing_tags if response.find(tag) != -1]
+    if not matches:
+        return response
+    idx, tag = min(matches, key=lambda item: item[0])
+    return response[: idx + len(tag)] + end_signal
 
 @dataclass
 class GenerationConfig:
@@ -41,6 +87,11 @@ class GenerationConfig:
     trunc_strength: int = 0
     hard_tolerate_num: int = 2
     strict_progress_label: bool = False
+    completion_bonus: float = 0.0
+    tau2_t3_progress_mode: str = "legacy"
+    tau2_t3_min_turn: int = 6
+    tau2_arew_label_mode: str = "clean"
+    tau2_arew_min_turn: int = 8
 
 
 class LLMGenerationManager:
@@ -114,12 +165,7 @@ class LLMGenerationManager:
             responses, 
             skip_special_tokens=True
         )
-        responses_str = [
-            resp.split('</answer>')[0] + f'</answer>{end_signal}' if '</answer>' in resp
-            else resp.split('</interact>')[0] + f'</interact>{end_signal}' if '</interact>' in resp
-            else resp
-            for resp in responses_str
-        ]
+        responses_str = [_truncate_response_to_action(resp) for resp in responses_str]
 
         responses, modified_responses = self._batch_tokenize_(responses_str)
         return responses, modified_responses, responses_str
@@ -152,6 +198,19 @@ class LLMGenerationManager:
             dtype=torch.int16,
         )
         return torch.where(response_mask, current_step_id.expand_as(step_ids), step_ids)
+
+    def _build_arew_flag_tensor(self, responses: torch.Tensor, step_flags: List[int | bool]) -> torch.Tensor:
+        """Broadcast a per-step complementary fallback flag to all non-pad tokens."""
+        flags = torch.zeros_like(responses, dtype=torch.int8)
+        if len(step_flags) == 0:
+            return flags
+        response_mask = self.tensor_fn.create_attention_mask(responses).bool()
+        step_flag_tensor = torch.tensor(
+            [1 if bool(flag) else 0 for flag in step_flags],
+            device=responses.device,
+            dtype=torch.int8,
+        ).unsqueeze(1)
+        return torch.where(response_mask, step_flag_tensor.expand_as(flags), flags)
 
     def _process_next_obs(self, next_obs: List[str]) -> torch.Tensor:
         """Process next observations from environment."""
@@ -201,10 +260,12 @@ class LLMGenerationManager:
                 prompt_with_mask: torch.Tensor, 
                 prompt_arew_labels: torch.Tensor,
                 prompt_arew_step_ids: torch.Tensor,
+                prompt_arew_complementary_mask: torch.Tensor,
                 response: torch.Tensor, 
                 response_with_step: torch.Tensor, 
                 response_arew_labels: torch.Tensor,
                 response_arew_step_ids: torch.Tensor,
+                response_arew_complementary_mask: torch.Tensor,
                 info: torch.Tensor = None,
                 pad_to_left: bool = True
             ) -> torch.Tensor:
@@ -216,6 +277,7 @@ class LLMGenerationManager:
         tensors_with_mask = [prompt_with_mask, response]
         tensors_with_arew = [prompt_arew_labels, response_arew_labels]
         tensors_with_arew_step_ids = [prompt_arew_step_ids, response_arew_step_ids]
+        tensors_with_arew_complementary = [prompt_arew_complementary_mask, response_arew_complementary_mask]
         
         if info is not None:
             tensors.append(info)
@@ -226,12 +288,16 @@ class LLMGenerationManager:
             tensors_with_arew_step_ids.append(
                 torch.zeros(info.size(), dtype=prompt_arew_step_ids.dtype, device=info.device)
             )
+            tensors_with_arew_complementary.append(
+                torch.zeros(info.size(), dtype=prompt_arew_complementary_mask.dtype, device=info.device)
+            )
         
         concatenated = torch.cat(tensors, dim=1)
         concatenated_with_step = torch.cat(tensors_with_step, dim=1)
         concatenated_with_info = torch.cat(tensors_with_mask, dim=1)
         concatenated_with_arew = torch.cat(tensors_with_arew, dim=1)
         concatenated_with_arew_step_ids = torch.cat(tensors_with_arew_step_ids, dim=1)
+        concatenated_with_arew_complementary = torch.cat(tensors_with_arew_complementary, dim=1)
 
         mask = concatenated != pad_id if pad_to_left else concatenated == pad_id
         sorted_indices = mask.to(torch.int64).argsort(dim=1, stable=True)
@@ -241,6 +307,7 @@ class LLMGenerationManager:
         padded_tensor_with_info = concatenated_with_info.gather(1, sorted_indices)
         padded_tensor_with_arew = concatenated_with_arew.gather(1, sorted_indices)
         padded_tensor_with_arew_step_ids = concatenated_with_arew_step_ids.gather(1, sorted_indices)
+        padded_tensor_with_arew_complementary = concatenated_with_arew_complementary.gather(1, sorted_indices)
 
         return (
             padded_tensor,
@@ -248,6 +315,7 @@ class LLMGenerationManager:
             padded_tensor_with_info,
             padded_tensor_with_arew,
             padded_tensor_with_arew_step_ids,
+            padded_tensor_with_arew_complementary,
         )
 
     def _update_right_side(self, right_side: Dict, 
@@ -255,6 +323,7 @@ class LLMGenerationManager:
                           cur_res_ids_with_step: torch.Tensor,
                           cur_res_arew_labels: torch.Tensor,
                           cur_res_arew_step_ids: torch.Tensor,
+                          cur_res_arew_complementary_mask: torch.Tensor,
                           next_obs_ids: torch.Tensor = None) -> Dict:
         """Update right side state."""
         if next_obs_ids != None:
@@ -264,16 +333,19 @@ class LLMGenerationManager:
                 responses_with_info_mask,
                 responses_arew_labels,
                 responses_arew_step_ids,
+                responses_arew_complementary_mask,
             ) = self._info_masked_concatenate_with_padding(
                     right_side['responses'],
                     right_side['responses_with_step'],
                     right_side['responses_with_info_mask'],
                     right_side['responses_arew_labels'],
                     right_side['responses_arew_step_ids'],
+                    right_side['responses_arew_complementary_mask'],
                     cur_res_ids,
                     cur_res_ids_with_step,
                     cur_res_arew_labels,
                     cur_res_arew_step_ids,
+                    cur_res_arew_complementary_mask,
                     next_obs_ids, 
                     pad_to_left=False
                 )
@@ -284,16 +356,19 @@ class LLMGenerationManager:
                 responses_with_info_mask,
                 responses_arew_labels,
                 responses_arew_step_ids,
+                responses_arew_complementary_mask,
             ) = self._info_masked_concatenate_with_padding(
                     right_side['responses'],
                     right_side['responses_with_step'],
                     right_side['responses_with_info_mask'],
                     right_side['responses_arew_labels'],
                     right_side['responses_arew_step_ids'],
+                    right_side['responses_arew_complementary_mask'],
                     cur_res_ids,
                     cur_res_ids_with_step,
                     cur_res_arew_labels,
                     cur_res_arew_step_ids,
+                    cur_res_arew_complementary_mask,
                     pad_to_left=False
                 )
         max_len = int(self.tensor_fn.create_attention_mask(responses).sum(dim=1).max().item())
@@ -302,7 +377,8 @@ class LLMGenerationManager:
                 'responses_with_step': responses_with_step[:, :max_len],
                 'responses_with_info_mask': responses_with_info_mask[:, :max_len],
                 'responses_arew_labels': responses_arew_labels[:, :max_len],
-                'responses_arew_step_ids': responses_arew_step_ids[:, :max_len]}
+                'responses_arew_step_ids': responses_arew_step_ids[:, :max_len],
+                'responses_arew_complementary_mask': responses_arew_complementary_mask[:, :max_len]}
 
     def _generate_with_gpu_padding(self, active_batch: DataProto, rollout_wg) -> DataProto:
         """
@@ -363,7 +439,8 @@ class LLMGenerationManager:
                                'responses_with_info_mask': initial_input_ids[:, []],
                                'responses_with_step': initial_input_ids[:, []],
                                'responses_arew_labels': initial_input_ids[:, []].to(torch.int8),
-                               'responses_arew_step_ids': initial_input_ids[:, []].to(torch.int16)}
+                               'responses_arew_step_ids': initial_input_ids[:, []].to(torch.int16),
+                               'responses_arew_complementary_mask': initial_input_ids[:, []].to(torch.int8)}
         
         active_mask = torch.ones(gen_batch.batch['input_ids'].shape[0], dtype=torch.bool)
         turns_stats = torch.ones(gen_batch.batch['input_ids'].shape[0], dtype=torch.int)
@@ -378,21 +455,63 @@ class LLMGenerationManager:
             search_spaces = [MovieRecSpace(controller, self.config.max_turns, global_step, self.config.trunc_strength, self.epsilon_win) for controller in controllers]
         elif self.config.dataset == "Tau2Bench":
             controllers = [itm for itm in gen_batch.non_tensor_batch['controller']]
-            search_spaces = [
-                Tau2SoloSpace(
-                    controller,
-                    self.config.max_turns,
-                    global_step,
-                    self.config.trunc_strength,
-                    self.config.hard_tolerate_num,
-                    self.config.strict_progress_label,
-                )
-                for controller in controllers
-            ]
+            search_spaces = []
+            standard_search_spaces = []
+            effective_trunc_strength = self.config.trunc_strength if self.config.early_cut else None
+            for controller in controllers:
+                if controller.get("mode", "solo") == "standard":
+                    space = Tau2StandardSpace(
+                        controller,
+                        self.config.max_turns,
+                        global_step,
+                        effective_trunc_strength,
+                        self.config.hard_tolerate_num,
+                        self.config.strict_progress_label,
+                        self.config.completion_bonus,
+                        self.config.tau2_t3_progress_mode,
+                        self.config.tau2_t3_min_turn,
+                        self.config.tau2_arew_label_mode,
+                        self.config.tau2_arew_min_turn,
+                        defer_bootstrap=True,
+                    )
+                    standard_search_spaces.append(space)
+                else:
+                    space = Tau2SoloSpace(
+                        controller,
+                        self.config.max_turns,
+                        global_step,
+                        effective_trunc_strength,
+                        self.config.hard_tolerate_num,
+                        self.config.strict_progress_label,
+                    )
+                search_spaces.append(space)
+            if standard_search_spaces:
+                max_workers = min(len(standard_search_spaces), _TAU2_STANDARD_USER_SIM_PARALLELISM)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    list(executor.map(lambda space: space.bootstrap_conversation(), standard_search_spaces))
         else:
             raise NotImplementedError(f"Unsupported dataset: {self.config.dataset}")
-        active_num_list = [active_mask.sum().item()]
         rollings = gen_batch
+
+        if self.config.dataset == "Tau2Bench":
+            bootstrap_turns = [
+                space.bootstrap_visible_turns() if hasattr(space, "bootstrap_visible_turns") else []
+                for space in search_spaces
+            ]
+            if any(bootstrap_turns):
+                bootstrap_obs = [_render_standard_bootstrap(turns) for turns in bootstrap_turns]
+                bootstrap_obs_ids = self._process_next_obs(bootstrap_obs)
+                rollings = self._update_rolling_state(
+                    rollings,
+                    initial_input_ids[:, []],
+                    bootstrap_obs_ids,
+                )
+                original_left_side = {'input_ids': rollings.batch['input_ids'][:, -self.config.max_start_length:]}
+            active_mask = torch.tensor([space.must_stop != 1.0 for space in search_spaces], dtype=torch.bool)
+            turns_stats = active_mask.to(torch.int)
+
+        active_num_list = [active_mask.sum().item()]
+        meta_info = {}
 
         # Main generation loop
         for step in range(self.config.max_turns):
@@ -415,11 +534,12 @@ class LLMGenerationManager:
             responses_ids, responses_ids_with_step, responses_str = self.tensor_fn._example_level_pad(responses_ids, responses_ids_with_step, responses_str, active_mask)
 
             # Execute in environment and process observations
-            next_obs, dones, valid_action, is_search, step_labels = self.execute_predictions(
+            next_obs, dones, valid_action, is_search, step_labels, step_fallback_flags = self.execute_predictions(
                 responses_str, search_spaces, self.tokenizer.pad_token, active_mask, validate, global_step
             )
             cur_res_arew_labels = self._build_arew_label_tensor(responses_ids, step_labels)
             cur_res_arew_step_ids = self._build_arew_step_id_tensor(responses_ids, step)
+            cur_res_arew_complementary_mask = self._build_arew_flag_tensor(responses_ids, step_fallback_flags)
             
             # i-th turn finished. Update as follows.
             curr_active_mask = torch.tensor([not done for done in dones], dtype=torch.bool)
@@ -444,6 +564,7 @@ class LLMGenerationManager:
                     responses_ids_with_step,
                     cur_res_arew_labels,
                     cur_res_arew_step_ids,
+                    cur_res_arew_complementary_mask,
                     next_obs_ids
                 )
             else:
@@ -452,7 +573,8 @@ class LLMGenerationManager:
                     responses_ids,
                     responses_ids_with_step,
                     cur_res_arew_labels,
-                    cur_res_arew_step_ids
+                    cur_res_arew_step_ids,
+                    cur_res_arew_complementary_mask
                 )
         
         if active_mask.sum():
@@ -476,13 +598,65 @@ class LLMGenerationManager:
             meta_info['tau2_positive_steps'] = [sum(1 for label in sp.step_label_history if label > 0) for sp in search_spaces]
             meta_info['tau2_neutral_steps'] = [sum(1 for label in sp.step_label_history if label == 0) for sp in search_spaces]
             meta_info['tau2_negative_steps'] = [sum(1 for label in sp.step_label_history if label < 0) for sp in search_spaces]
+            meta_info['tau2_arew_positive_steps'] = [
+                sum(1 for label in getattr(sp, "arew_label_history", []) if label > 0) for sp in search_spaces
+            ]
+            meta_info['tau2_arew_neutral_steps'] = [
+                sum(1 for label in getattr(sp, "arew_label_history", []) if label == 0) for sp in search_spaces
+            ]
+            meta_info['tau2_arew_negative_steps'] = [
+                sum(1 for label in getattr(sp, "arew_label_history", []) if label < 0) for sp in search_spaces
+            ]
+            meta_info['tau2_arew_has_pos_neg'] = [
+                float(
+                    any(label > 0 for label in getattr(sp, "arew_label_history", []))
+                    and any(label < 0 for label in getattr(sp, "arew_label_history", []))
+                )
+                for sp in search_spaces
+            ]
+            meta_info['tau2_message_turns'] = [getattr(sp, "assistant_message_turn_count", 0) for sp in search_spaces]
+            meta_info['tau2_tool_turns'] = [getattr(sp, "assistant_tool_turn_count", 0) for sp in search_spaces]
+            meta_info['tau2_read_tool_turns'] = [getattr(sp, "assistant_read_tool_turn_count", 0) for sp in search_spaces]
+            meta_info['tau2_write_tool_turns'] = [getattr(sp, "assistant_write_tool_turn_count", 0) for sp in search_spaces]
+            meta_info['tau2_user_tool_hops'] = [getattr(sp, "user_tool_hop_count", 0) for sp in search_spaces]
+            meta_info['tau2_bootstrap_user_tool_hops'] = [getattr(sp, "bootstrap_user_tool_hop_count", 0) for sp in search_spaces]
+            meta_info['tau2_user_disconnects'] = [getattr(sp, "user_disconnect_count", 0) for sp in search_spaces]
+            meta_info['tau2_bootstrap_user_disconnects'] = [getattr(sp, "bootstrap_user_disconnect_count", 0) for sp in search_spaces]
+            meta_info['tau2_disconnect_repeat_neutral_steps'] = [
+                getattr(sp, "disconnect_repeat_neutral_count", 0) for sp in search_spaces
+            ]
+            meta_info['tau2_assistant_tool_errors'] = [getattr(sp, "assistant_tool_error_count", 0) for sp in search_spaces]
+            meta_info['tau2_user_tool_errors'] = [getattr(sp, "user_tool_error_count", 0) for sp in search_spaces]
+            meta_info['tau2_state_changed_steps'] = [getattr(sp, "state_changed_step_count", 0) for sp in search_spaces]
+            meta_info['tau2_action_progress_steps'] = [getattr(sp, "action_progress_step_count", 0) for sp in search_spaces]
+            meta_info['tau2_new_raw_information_steps'] = [getattr(sp, "new_raw_information_step_count", 0) for sp in search_spaces]
+            meta_info['tau2_new_normalized_information_steps'] = [
+                getattr(sp, "new_normalized_information_step_count", 0) for sp in search_spaces
+            ]
+            meta_info['tau2_new_family_steps'] = [getattr(sp, "new_family_step_count", 0) for sp in search_spaces]
+            meta_info['tau2_max_no_progress_streak'] = [getattr(sp, "max_soft_no_progress_streak", 0) for sp in search_spaces]
+            meta_info['tau2_t3_truncation_turn'] = [getattr(sp, "t3_truncation_turn", 0) for sp in search_spaces]
+            meta_info['tau2_user_stopped'] = [1.0 if getattr(sp, "user_stopped", False) else 0.0 for sp in search_spaces]
 
         if self.config.dataset in ['MovieRec']:
             meta_info['consecutive_drop_counts'] = [sp.consecutive_drop_counts for sp in search_spaces]
 
         final_rewards = []
+        tau2_official_rewards = None
+        tau2_train_fractional_rewards = None
+        tau2_stop_reasons = None
         if self.config.dataset == "Tau2Bench":
-            final_rewards = [space.finalize().reward for space in search_spaces]
+            if validate:
+                tau2_official_rewards = [space.finalize(official=True).reward for space in search_spaces]
+                tau2_train_fractional_rewards = [space.finalize(official=False).reward for space in search_spaces]
+                final_rewards = tau2_official_rewards
+            else:
+                tau2_train_fractional_rewards = [space.finalize(official=False).reward for space in search_spaces]
+                final_rewards = tau2_train_fractional_rewards
+            tau2_stop_reasons = [
+                getattr(space, "user_stop_reason", None) or "max_turn_or_runtime_end"
+                for space in search_spaces
+            ]
             meta_info['tau2_final_rewards'] = final_rewards
 
         meta_info['active_trajectory_counts'] = active_num_list
@@ -491,7 +665,19 @@ class LLMGenerationManager:
             final_output.batch["rm_scores"] = self._build_rm_scores(final_output.batch["responses"], final_rewards)
             final_output.batch["responses_arew_labels"] = final_output.batch["responses_arew_labels"].to(torch.int8)
             final_output.batch["responses_arew_step_ids"] = final_output.batch["responses_arew_step_ids"].to(torch.int16)
+            final_output.batch["responses_arew_complementary_mask"] = final_output.batch[
+                "responses_arew_complementary_mask"
+            ].to(torch.int8)
             final_output.non_tensor_batch["final_rewards"] = np.array(final_rewards, dtype=np.float32)
+            if tau2_official_rewards is not None:
+                final_output.non_tensor_batch["tau2_official_rewards"] = np.array(tau2_official_rewards, dtype=np.float32)
+            if tau2_train_fractional_rewards is not None:
+                final_output.non_tensor_batch["tau2_train_fractional_rewards"] = np.array(
+                    tau2_train_fractional_rewards,
+                    dtype=np.float32,
+                )
+            if tau2_stop_reasons is not None:
+                final_output.non_tensor_batch["tau2_stop_reason"] = np.array(tau2_stop_reasons, dtype=object)
             final_output.non_tensor_batch["tau2_task_id"] = np.array([space.task_id for space in search_spaces], dtype=object)
             final_output.non_tensor_batch["tau2_trajectory"] = np.array(
                 [space.format_trajectory() for space in search_spaces],
@@ -548,14 +734,46 @@ class LLMGenerationManager:
         """
         if not validate and not self.config.early_cut:
             validate = True
+        allow_invalid_retry = validate or self.config.dataset == "Tau2Bench"
 
+        del pad_token
         cur_actions, contents = self.postprocess_predictions(predictions)
-        next_obs, dones, valid_action, is_search, step_labels = [], [], [], [], []
+        next_obs, dones, valid_action, is_search, step_labels, step_fallback_flags = [], [], [], [], [], []
         
         assert len(contents) == len(search_spaces), f"#Interacts != #GroundTruths: {len(contents)} != {len(search_spaces)}"
         
         if self.config.dataset in ['CircuitDecoding', 'MovieRec', 'Tau2Bench']:
-            feedback_results = [search_space.compute_feedback(content, validate) for action, content, search_space in zip(cur_actions, contents, search_spaces) if action == 'interact']
+            interact_payloads = [
+                (content, search_space)
+                for action, content, search_space, active in zip(cur_actions, contents, search_spaces, active_mask)
+                if bool(active) and action == 'interact'
+            ]
+            message_payloads = [
+                (content, search_space)
+                for action, content, search_space, active in zip(cur_actions, contents, search_spaces, active_mask)
+                if bool(active) and action == 'message' and hasattr(search_space, "compute_message_feedback")
+            ]
+            feedback_results = [
+                search_space.compute_feedback(content, validate)
+                for content, search_space in interact_payloads
+            ]
+            if self.config.dataset == "Tau2Bench" and len(message_payloads) > 1:
+                max_workers = min(len(message_payloads), _TAU2_STANDARD_USER_SIM_PARALLELISM)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    message_feedback_results = list(
+                        executor.map(
+                            lambda item: item[1].compute_message_feedback(item[0], validate),
+                            message_payloads,
+                        )
+                    )
+            else:
+                message_feedback_results = [
+                    search_space.compute_message_feedback(content, validate)
+                    for content, search_space in message_payloads
+                ]
+        else:
+            feedback_results = []
+            message_feedback_results = []
         
         for i, (action, active) in enumerate(zip(cur_actions, active_mask)):
             
@@ -565,28 +783,48 @@ class LLMGenerationManager:
                 valid_action.append(0)
                 is_search.append(0)
                 step_labels.append(0)
+                step_fallback_flags.append(0)
             else:
                 if action == 'answer':
-                    if self.config.dataset == "Tau2Bench":
-                        search_spaces[i].register_answer()
+                    if getattr(search_spaces[i], "supports_answer", True):
+                        if self.config.dataset == "Tau2Bench":
+                            search_spaces[i].register_answer(contents[i])
+                        valid_action_value = 1
+                    else:
+                        search_spaces[i].register_answer(contents[i])
+                        valid_action_value = 0
                     next_obs.append('')
                     dones.append(1)
-                    valid_action.append(1)
+                    valid_action.append(valid_action_value)
                     is_search.append(0)
-                    step_labels.append(0)
+                    if self.config.dataset == "Tau2Bench" and hasattr(search_spaces[i], "last_arew_label"):
+                        step_labels.append(search_spaces[i].last_arew_label)
+                    elif self.config.dataset == "Tau2Bench":
+                        step_labels.append(search_spaces[i].last_step_label)
+                    else:
+                        step_labels.append(0)
+                    step_fallback_flags.append(0)
                 elif action == 'interact':
                     feedbacks = feedback_results.pop(0)
                     step_label = 0
+                    step_fallback_flag = 0
                     if self.config.dataset == "Tau2Bench":
-                        step_label = search_spaces[i].last_step_label
+                        if hasattr(search_spaces[i], "last_arew_label"):
+                            step_label = search_spaces[i].last_arew_label
+                            step_fallback_flag = int(getattr(search_spaces[i], "last_arew_fallback_eligible", 0))
+                        else:
+                            step_label = search_spaces[i].last_step_label
                     if feedbacks:
-                        next_obs.append(
-                            f"{start_user}"
-                            f"The feedback of your latest interaction: {feedbacks.strip()}\n"
-                            f"Now it is your turn:\n"
-                            f"{end_signal}"
-                            f"{start_assistant}"
-                        )
+                        if isinstance(feedbacks, dict):
+                            next_obs.append(_render_chat_observation(feedbacks["role"], feedbacks["content"]))
+                        else:
+                            next_obs.append(
+                                f"{start_user}"
+                                f"The feedback of your latest interaction: {feedbacks.strip()}\n"
+                                f"Now it is your turn:\n"
+                                f"{end_signal}"
+                                f"{start_assistant}"
+                            )
                         dones.append(0)
                         valid_action.append(1)
                         is_search.append(1)
@@ -596,19 +834,68 @@ class LLMGenerationManager:
                         valid_action.append(1)
                         is_search.append(1)
                     step_labels.append(step_label)
+                    step_fallback_flags.append(step_fallback_flag)
+                elif action == 'message' and hasattr(search_spaces[i], "compute_message_feedback"):
+                    feedbacks = message_feedback_results.pop(0)
+                    step_label = 0
+                    step_fallback_flag = 0
+                    if self.config.dataset == "Tau2Bench":
+                        if hasattr(search_spaces[i], "last_arew_label"):
+                            step_label = search_spaces[i].last_arew_label
+                            step_fallback_flag = int(getattr(search_spaces[i], "last_arew_fallback_eligible", 0))
+                        else:
+                            step_label = search_spaces[i].last_step_label
+                    if feedbacks:
+                        if isinstance(feedbacks, dict):
+                            next_obs.append(_render_chat_observation(feedbacks["role"], feedbacks["content"]))
+                        else:
+                            next_obs.append(
+                                f"{start_user}"
+                                f"{feedbacks.strip()}\n"
+                                f"{end_signal}"
+                                f"{start_assistant}"
+                            )
+                        dones.append(0)
+                        valid_action.append(1)
+                        is_search.append(0)
+                    else:
+                        next_obs.append('')
+                        dones.append(1)
+                        valid_action.append(1)
+                        is_search.append(0)
+                    step_labels.append(step_label)
+                    step_fallback_flags.append(step_fallback_flag)
                 else:
                     if self.config.dataset == "Tau2Bench":
                         search_spaces[i].register_invalid_action("invalid_prediction_format")
                     think_retry_hint = ""
                     if self.config.dataset == "Tau2Bench" and search_spaces[i].controller.get("enable_think", False):
-                        think_retry_hint = (
-                            " If think mode is enabled, you should first write a short <think>...</think> block and then "
-                            "output either one <interact>...</interact> or one <answer>...</answer> block."
-                        )
-                    if validate:
+                        if getattr(search_spaces[i], "supports_answer", True):
+                            think_retry_hint = (
+                                " If think mode is enabled, you should first write a short <think>...</think> block and then "
+                                "output either one <interact>...</interact> or one <answer>...</answer> block."
+                            )
+                        else:
+                            think_retry_hint = (
+                                " If think mode is enabled, you should first write a short <think>...</think> block and then "
+                                "output either one <message>...</message> or one <interact>...</interact> block."
+                            )
+                    if allow_invalid_retry:
+                        if getattr(search_spaces[i], "supports_answer", True):
+                            invalid_instruction = (
+                                "The previous action is invalid. If you want to make an interaction, you should put it between "
+                                "<interact> and </interact>. If you want to give the final answer, you should put the answer "
+                                "between <answer> and </answer>."
+                            )
+                        else:
+                            invalid_instruction = (
+                                "The previous action is invalid. If you want to speak to the user, you should put it between "
+                                "<message> and </message>. If you want to make an interaction, you should put it between "
+                                "<interact> and </interact>."
+                            )
                         next_obs.append(
                             f"{start_user}"
-                            f"The previous action is invalid. If you want to make an interaction, you should put it between <interact> and </interact>. If you want to give the final answer, you should put the answer between <answer> and </answer>.{think_retry_hint} Try again.\n"
+                            f"{invalid_instruction}{think_retry_hint} Try again.\n"
                             f"{end_signal}"
                             f"{start_assistant}"
                         )                        
@@ -622,10 +909,12 @@ class LLMGenerationManager:
                         valid_action.append(0)
                         is_search.append(0)
                     step_labels.append(-1)
+                    step_fallback_flags.append(0)
             
         assert len(feedback_results) == 0
+        assert len(message_feedback_results) == 0
             
-        return next_obs, dones, valid_action, is_search, step_labels
+        return next_obs, dones, valid_action, is_search, step_labels, step_fallback_flags
 
     def postprocess_predictions(self, predictions: List[Any]) -> Tuple[List[int], List[bool]]:
         """
@@ -642,7 +931,7 @@ class LLMGenerationManager:
                 
         for prediction in predictions:
             if isinstance(prediction, str): # for llm output
-                pattern = r'<(interact|answer)>(.*?)</\1>'
+                pattern = r'<(interact|answer|message)>(.*?)</\1>'
                 match = re.search(pattern, prediction, re.DOTALL)
                 if match:
                     content = match.group(2).strip()  # Return only the content inside the tags
