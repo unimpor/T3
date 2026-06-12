@@ -40,7 +40,7 @@ The two works address a shared problem: in long-horizon interactive reasoning, L
 
 This repository contains the core algorithms, data preprocessing, training and evaluation pipelines, and experimental setups for both methods. Beyond reproducing the original papers, we are extending the codebase into a broader platform for studying RL-trained LLM agents in realistic active reasoning, tool-use, and deep-research environments.
 
-![](./figs/main.png)
+![](./figs/main2.png)
 
 ## TODOs
 
@@ -145,7 +145,7 @@ The AREW release tasks are implemented in `verl/search_r1/arew_tasks/` and use t
 - `prompt`: the initial user prompt in chat format
 - `controller`: the task controller consumed by the AREW environment
 - `answer`: the final rule-based reward target
-- `data_source`: one of `PE-G`, `PE-F`, `MediQ`, or `FloDial`
+- `data_source`.
 
 The training wrappers default to the processed parquet names used by the paper runs:
 
