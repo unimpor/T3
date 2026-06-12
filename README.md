@@ -178,7 +178,7 @@ python3 verl/preprocess/data_process/tau2.py \
   --think_mode short
 ```
 
-This produces standard-mode files such as (the following two files are public in [here](https://huggingface.co/datasets/WorkingOut/T3_data).):
+This produces standard-mode files such as (the following two files are public [here](https://huggingface.co/datasets/WorkingOut/T3_data).):
 
 - `Tau2Bench/telecom/train_full_minus_test_9009_standard_think_short.parquet`
 - `Tau2Bench/telecom/val_full_minus_test_9009_standard_think_short.parquet`
@@ -192,7 +192,7 @@ The AREW release tasks are implemented in `verl/search_r1/arew_tasks/` and use t
 - `answer`: the final rule-based reward target
 - `data_source`.
 
-The training wrappers default to the processed parquet names used by the paper runs:
+The training wrappers default to the processed parquet names used by the paper runs (the following files are public [here](https://huggingface.co/datasets/WorkingOut/T3_data).):
 
 - `verl/data/PE-G/train_dtg_S3.parquet` and `verl/data/PE-G/val_dtg_S3.parquet`
 - `verl/data/PE-F/train_dtg_full_attr8_v2.parquet` and `verl/data/PE-F/val_dtg_full_attr8_v2.parquet`
