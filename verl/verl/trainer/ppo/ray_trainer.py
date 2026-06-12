@@ -62,6 +62,15 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from search_r1.llm_agent.generation import LLMGenerationManager, GenerationConfig, DATA2KEYS
+from search_r1.arew_tasks.generation import (
+    AREW_DATA2KEYS,
+    AREWGenerationConfig,
+    AREWGenerationManager,
+    is_arew_task,
+)
+
+
+GENERATION_DATA2KEYS = {**DATA2KEYS, **AREW_DATA2KEYS}
 
 
 WorkerType = type[Worker]
@@ -185,6 +194,14 @@ def compute_data_metrics_(batch, use_critic=True):
     for itm in ['tau2_arew_positive_steps', 'tau2_arew_neutral_steps', 'tau2_arew_negative_steps']:
         if itm in batch.meta_info:
             metrics[f'env/{itm}'] = float(np.array(batch.meta_info[itm], dtype=np.float32).mean())
+    for itm in [
+        'arew_as_positive_steps',
+        'arew_as_negative_steps',
+        'arew_bt_positive_steps',
+        'arew_bt_negative_steps',
+    ]:
+        if itm in batch.meta_info:
+            metrics[f'env/{itm}'] = float(np.array(batch.meta_info[itm], dtype=np.float32).mean())
     if 'tau2_arew_has_pos_neg' in batch.meta_info:
         metrics['env/tau2_arew_pos_neg_trajectory_ratio'] = float(
             np.array(batch.meta_info['tau2_arew_has_pos_neg'], dtype=np.float32).mean()
@@ -306,6 +323,14 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def _algo_config_get(config: Optional[AlgoConfig], key: str, default=None):
+    if config is None:
+        return default
+    if hasattr(config, "get"):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
 def get_arew_modifier(
     bonus_labels: torch.Tensor,
     advantages: torch.Tensor,
@@ -325,9 +350,14 @@ def get_arew_modifier(
     torch.Tensor,
 ]:
     """Map token-level {-1,0,+1} labels to a zero-sum advantage bonus."""
-    mode = getattr(config, "arew_bonus_mode", "minority_fixed")
-    scale = float(getattr(config, "arew_bonus_scale", 0.1))
-    negative_step_mode = getattr(config, "arew_negative_step_mode", "full")
+    mode = _algo_config_get(config, "bonus_mode", None)
+    if mode is None:
+        mode = _algo_config_get(config, "arew_bonus_mode", "minority_fixed")
+    scale = _algo_config_get(config, "bonus_scale", None)
+    if scale is None:
+        scale = _algo_config_get(config, "arew_bonus_scale", 0.1)
+    scale = float(scale)
+    negative_step_mode = _algo_config_get(config, "arew_negative_step_mode", "full")
 
     is_pos = bonus_labels.gt(0)
     is_neg = bonus_labels.lt(0)
@@ -522,10 +552,17 @@ def get_arew_modifier(
 
 
 def is_arew_active(config: Optional[AlgoConfig], global_step: int) -> bool:
-    if config is None or not config.get("use_arew_bonus", False):
+    if config is None:
         return False
-    start_step = int(getattr(config, "arew_start_step", 0))
-    end_step = int(getattr(config, "arew_end_step", -1))
+    enabled = (
+        bool(_algo_config_get(config, "use_arew_bonus", False))
+        or bool(_algo_config_get(config, "as_bonus", False))
+        or bool(_algo_config_get(config, "bt_bonus", False))
+    )
+    if not enabled:
+        return False
+    start_step = int(_algo_config_get(config, "arew_start_step", 0))
+    end_step = int(_algo_config_get(config, "arew_end_step", -1))
     if global_step < start_step:
         return False
     if end_step >= 0 and global_step >= end_step:
@@ -748,6 +785,9 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
+        self.use_interactions = bool(config.get("use_interactions", False))
+        if self.use_interactions:
+            assert Role.Interaction in role_worker_mapping, "use_interactions=True requires Role.Interaction worker"
         self.ray_worker_group_cls = ray_worker_group_cls
 
         self.device_name = device_name if device_name else self.config.trainer.device
@@ -1028,6 +1068,58 @@ class RayPPOTrainer:
         if non_console_loggers:
             self.validation_generations_logger.log(non_console_loggers, samples, self.global_steps)
 
+    def _build_generation_manager(self, is_validation: bool = False):
+        if is_arew_task(self.config.data_name):
+            gen_config = AREWGenerationConfig(
+                max_turns=self.config.max_turns,
+                max_start_length=self.config.data.max_start_length,
+                max_prompt_length=self.config.data.max_prompt_length,
+                max_response_length=self.config.data.max_response_length,
+                max_obs_length=self.config.data.max_obs_length,
+                num_gpus=self.config.trainer.n_gpus_per_node,
+                dataset=self.config.data_name,
+                experiment_name=self.config.trainer.experiment_name,
+                as_bonus=OmegaConf.select(self.config, "algorithm.as_bonus", default=False),
+                bt_bonus=OmegaConf.select(self.config, "algorithm.bt_bonus", default=False),
+                as_cf=OmegaConf.select(self.config, "algorithm.as_cf", default=False),
+                bt_cf=OmegaConf.select(self.config, "algorithm.bt_cf", default=False),
+                btv=OmegaConf.select(self.config, "algorithm.btv", default="v1"),
+            )
+            generation_manager = AREWGenerationManager(
+                tokenizer=self.tokenizer,
+                actor_rollout_wg=self.actor_rollout_wg,
+                config=gen_config,
+                is_validation=is_validation,
+                npc_rollout_wg=getattr(self, "interaction_wg", None),
+            )
+            return generation_manager, gen_config
+
+        gen_config = GenerationConfig(
+            max_turns=self.config.max_turns,
+            max_start_length=self.config.data.max_start_length,
+            max_prompt_length=self.config.data.max_prompt_length,
+            max_response_length=self.config.data.max_response_length,
+            max_obs_length=self.config.data.max_obs_length,
+            num_gpus=self.config.trainer.n_gpus_per_node,
+            dataset=self.config.data_name,
+            early_cut=self.config.early_cut,
+            trunc_strength=self.config.trunc_strength,
+            hard_tolerate_num=OmegaConf.select(self.config, "hard_tolerate_num", default=2),
+            strict_progress_label=OmegaConf.select(self.config, "tau2_strict_progress_label", default=False),
+            completion_bonus=OmegaConf.select(self.config, "tau2_completion_bonus", default=0.0),
+            tau2_t3_progress_mode=OmegaConf.select(self.config, "tau2_t3_progress_mode", default="legacy"),
+            tau2_t3_min_turn=OmegaConf.select(self.config, "tau2_t3_min_turn", default=6),
+            tau2_arew_label_mode=OmegaConf.select(self.config, "tau2_arew_label_mode", default="clean"),
+            tau2_arew_min_turn=OmegaConf.select(self.config, "tau2_arew_min_turn", default=8),
+        )
+        generation_manager = LLMGenerationManager(
+            tokenizer=self.tokenizer,
+            actor_rollout_wg=self.actor_rollout_wg,
+            config=gen_config,
+            is_validation=is_validation,
+        )
+        return generation_manager, gen_config
+
     def _validate(self):
         """
         The training loop of PPO with global metric computation.
@@ -1041,39 +1133,14 @@ class RayPPOTrainer:
         val_log_outputs = []
         val_log_scores = []
 
-        gen_config = GenerationConfig(
-            max_turns=self.config.max_turns,
-            max_start_length=self.config.data.max_start_length,
-            max_prompt_length=self.config.data.max_prompt_length,
-            max_response_length=self.config.data.max_response_length,
-            max_obs_length=self.config.data.max_obs_length,
-            num_gpus=self.config.trainer.n_gpus_per_node,
-            dataset = self.config.data_name,
-            early_cut = self.config.early_cut,
-            trunc_strength = self.config.trunc_strength,
-            hard_tolerate_num = OmegaConf.select(self.config, "hard_tolerate_num", default=2),
-            strict_progress_label = OmegaConf.select(self.config, "tau2_strict_progress_label", default=False),
-            completion_bonus = OmegaConf.select(self.config, "tau2_completion_bonus", default=0.0),
-            tau2_t3_progress_mode = OmegaConf.select(self.config, "tau2_t3_progress_mode", default="legacy"),
-            tau2_t3_min_turn = OmegaConf.select(self.config, "tau2_t3_min_turn", default=6),
-            tau2_arew_label_mode = OmegaConf.select(self.config, "tau2_arew_label_mode", default="clean"),
-            tau2_arew_min_turn = OmegaConf.select(self.config, "tau2_arew_min_turn", default=8),
-        )
-
-        # Agent config preparation
-        generation_manager = LLMGenerationManager(
-            tokenizer=self.tokenizer,
-            actor_rollout_wg=self.actor_rollout_wg,
-            config=gen_config,
-            is_validation = True,
-        )
+        generation_manager, gen_config = self._build_generation_manager(is_validation=True)
         for batch_dict in self.val_dataloader:
 
             test_batch: DataProto = DataProto.from_single_dict(batch_dict)
             # test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
             
             test_gen_batch = test_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'],
-                                            non_tensor_batch_keys=DATA2KEYS[self.config.data_name])
+                                            non_tensor_batch_keys=GENERATION_DATA2KEYS[self.config.data_name])
             test_gen_batch.meta_info = {
                 'eos_token_id': self.tokenizer.eos_token_id,
                 'pad_token_id': self.tokenizer.pad_token_id,
@@ -1180,6 +1247,16 @@ class RayPPOTrainer:
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
+        if self.use_interactions:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Interaction)
+            interaction_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.Interaction],
+                config=self.config.npc,
+                role="rollout",
+                profile_option=self.config.trainer.npu_profile.options,
+            )
+            self.resource_pool_to_cls[resource_pool]["interaction"] = interaction_cls
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -1220,6 +1297,11 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
+
+        self.interaction_wg = None
+        if self.use_interactions:
+            self.interaction_wg = all_wg["interaction"]
+            self.interaction_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
@@ -1447,30 +1529,7 @@ class RayPPOTrainer:
         self.global_steps += 1
         last_val_metrics = None
         self.max_steps_duration = 0
-        gen_config = GenerationConfig(
-            max_turns=self.config.max_turns,
-            max_start_length=self.config.data.max_start_length,
-            max_prompt_length=self.config.data.max_prompt_length,
-            max_response_length=self.config.data.max_response_length,
-            max_obs_length=self.config.data.max_obs_length,
-            num_gpus=self.config.trainer.n_gpus_per_node,
-            dataset = self.config.data_name,
-            early_cut = self.config.early_cut,
-            trunc_strength = self.config.trunc_strength,
-            hard_tolerate_num = OmegaConf.select(self.config, "hard_tolerate_num", default=2),
-            strict_progress_label = OmegaConf.select(self.config, "tau2_strict_progress_label", default=False),
-            completion_bonus = OmegaConf.select(self.config, "tau2_completion_bonus", default=0.0),
-            tau2_t3_progress_mode = OmegaConf.select(self.config, "tau2_t3_progress_mode", default="legacy"),
-            tau2_t3_min_turn = OmegaConf.select(self.config, "tau2_t3_min_turn", default=6),
-            tau2_arew_label_mode = OmegaConf.select(self.config, "tau2_arew_label_mode", default="clean"),
-            tau2_arew_min_turn = OmegaConf.select(self.config, "tau2_arew_min_turn", default=8),
-        )
-
-        generation_manager = LLMGenerationManager(
-            tokenizer=self.tokenizer,
-            actor_rollout_wg=self.actor_rollout_wg,
-            config=gen_config
-        )
+        generation_manager, gen_config = self._build_generation_manager(is_validation=False)
         self.best_reward = float('-inf')
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
@@ -1491,7 +1550,7 @@ class RayPPOTrainer:
                 # pop those keys for generation
                 batch.batch['input_ids'] = batch.batch['input_ids'].long()
                 gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'],
-                                      non_tensor_batch_keys=DATA2KEYS[self.config.data_name])
+                                      non_tensor_batch_keys=GENERATION_DATA2KEYS[self.config.data_name])
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps

@@ -40,7 +40,7 @@ The two works address a shared problem: in long-horizon interactive reasoning, L
 
 This repository contains the core algorithms, data preprocessing, training and evaluation pipelines, and experimental setups for both methods. Beyond reproducing the original papers, we are extending the codebase into a broader platform for studying RL-trained LLM agents in realistic active reasoning, tool-use, and deep-research environments.
 
-![](./figs/main2.png)
+![](./figs/main.png)
 
 ## TODOs
 
@@ -94,7 +94,7 @@ Notes: the following is the version of key packages in the environment we are cu
 
 The released preprocessing scripts write parquet files in the format expected by `main_ppo.py`. The dataset (parquet formats) can be found [here](https://huggingface.co/datasets/WorkingOut/T3_data).
 
-### 1. CircuitDecoding
+### CircuitDecoding
 
 Default raw file location:
 
@@ -116,7 +116,7 @@ This produces:
 
 The script also supports `--input_file`, `--train_size`, `--val_size`, `--train_output`, and `--val_output`.
 
-### 2. MovieRec
+### MovieRec
 
 Default raw file location:
 
@@ -138,11 +138,29 @@ This produces:
 
 The script also supports overriding the input path, output path, split sizes, `data_source`, and controller variant.
 
-### 3. Tau2Bench
+### AREW Tasks: PE-G, PE-F, MediQ, FloDial
+
+The AREW release tasks are implemented in `verl/search_r1/arew_tasks/` and use the same PPO entry point as T3. Each parquet row should contain:
+
+- `prompt`: the initial user prompt in chat format
+- `controller`: the task controller consumed by the AREW environment
+- `answer`: the final rule-based reward target
+- `data_source`: one of `PE-G`, `PE-F`, `MediQ`, or `FloDial`
+
+The training wrappers default to the processed parquet names used by the paper runs:
+
+- `verl/data/PE-G/train_dtg_S3.parquet` and `verl/data/PE-G/val_dtg_S3.parquet`
+- `verl/data/PE-F/train_dtg_full_attr8_v2.parquet` and `verl/data/PE-F/val_dtg_full_attr8_v2.parquet`
+- `verl/data/MediQ/train_beta_known_dtg.parquet` and `verl/data/MediQ/val_beta_known_dtg.parquet`
+- `verl/data/FloDial/train_beta_label_opt5_max2.parquet` and `verl/data/FloDial/val_beta_label_opt5_max2.parquet`
+
+You can override these paths with `TRAIN_FILE` and `VAL_FILE`.
+
+### Tau2Bench
 
 Tau2Bench data is generated from the task definitions under `verl/search_r1/tau2_adapter/`.
 
-**Solo-mode** example:
+Solo-mode example:
 
 ```bash
 python3 verl/preprocess/data_process/tau2.py \
@@ -162,7 +180,7 @@ This writes parquet files under:
 
 If you need filenames aligned with a specific training wrapper, set `--train_output` and `--val_output`, or override `TRAIN_FILE` and `VAL_FILE` when launching training.
 
-**Standard-mode** example with an LLM-simulated user:
+Standard-mode example with an LLM-simulated user:
 
 ```bash
 python3 verl/preprocess/data_process/tau2.py \
@@ -178,7 +196,7 @@ python3 verl/preprocess/data_process/tau2.py \
   --think_mode short
 ```
 
-This produces standard-mode files such as (the following two files are public in [here](https://huggingface.co/datasets/WorkingOut/T3_data).):
+This produces standard-mode files such as:
 
 - `Tau2Bench/telecom/train_full_minus_test_9009_standard_think_short.parquet`
 - `Tau2Bench/telecom/val_full_minus_test_9009_standard_think_short.parquet`
@@ -195,9 +213,7 @@ python3 -m verl.trainer.main_ppo ...
 
 The example scripts under `verl/cmd/` are thin wrappers around this command.
 
-For CircuitDecoding and MovieRec, we provide T3 implementation. For Tau2Bench, we provide both T3 and AREW implementation.
-
-### 1. CircuitDecoding
+### CircuitDecoding
 
 ```bash
 bash verl/cmd/cd/ppo.sh
@@ -213,7 +229,7 @@ Key environment overrides:
 - `TRAIN_FILE`
 - `VAL_FILE`
 
-### 2. MovieRec
+### MovieRec
 
 ```bash
 bash verl/cmd/mrv/ppo.sh
@@ -221,19 +237,34 @@ bash verl/cmd/mrv/ppo.sh
 
 The structure is the same as CircuitDecoding, with MovieRec-specific default parquet names.
 
-### 3. Tau2Bench
-
-For **solo** mode,
+### AREW Tasks
 
 ```bash
-bash verl/cmd/tau2/ppo1.1.sh  # This is for the solo-mode.
+bash verl/cmd/pe/ppo_pe_g.sh
+bash verl/cmd/pe/ppo_pe_f.sh
+bash verl/cmd/mediq/ppo.sh
+bash verl/cmd/flodial/ppo.sh
+```
+
+The four scripts expose the main AREW knobs through environment variables:
+
+- `AS_BONUS` and `BT_BONUS` enable action-selection and belief-tracking labels.
+- `BONUS_MODE` defaults to `minority_fixed`.
+- `BONUS_SCALE` controls the zero-sum advantage bonus magnitude. The default paper AS&BT scales are `0.2` for PE-G, `1.0` for PE-F and MediQ, and `0.5` for FloDial.
+- `AS_CF` and `BT_CF` are only used by MediQ; PE-G, PE-F, and FloDial ignore counterfactual generation.
+- `TRAIN_FILE`, `VAL_FILE`, `BASE_MODEL`, `NPC_MODEL`, and `OUTPUT_ROOT` override data, model, and output paths.
+
+### Tau2Bench
+
+```bash
+bash verl/cmd/tau2/ppo1.1.sh
 ```
 
 - `verl/cmd/tau2/ppo.sh` for a PPO-style baseline
 - `verl/cmd/tau2/ppo1.1.sh` and related variants for T3-enabled settings
 - `verl/cmd/tau2/ppo1.2.sh` and related variants for AREW-enabled settings
 
-For Tau2Bench **standard** mode with an LLM-simulated user:
+For Tau2Bench standard mode with an LLM-simulated user:
 
 ```bash
 export TAU2_STANDARD_USER_API_KEY=...
@@ -261,33 +292,18 @@ T3 is intended to be applicable beyond a single benchmark or environment family.
 
 ### 1. Tau2Bench
 
-Many thanks to https://github.com/sierra-research/tau2-bench!
+We evaluate on Tau2Bench-Telecom, a multi-turn tool-use benchmark where the agent must resolve realistic customer-service tickets by interacting with an environment through API-like tools. The repository includes both the solo mode setting, where the policy interacts directly with the environment/tool interface, and the standard setting, where the policy interacts with an LLM-simulated user while assistant-side tool calls are executed by the backend environment.
 
-We evaluate on Tau2Bench-Telecom, a multi-turn tool-use benchmark where the agent must resolve realistic customer-service tickets by interacting with an environment through API-like tools. The repository includes both the **solo** mode setting, where the policy interacts directly with the environment/tool interface, and the **standard** setting, where the policy interacts with an LLM-simulated user while assistant-side tool calls are executed by the backend environment.
+For this setting, we derive simple step-level signals directly from the online interaction trace: a step is labeled **positive** if it increases the number of matched expected actions in the benchmark evaluator, negative if it corresponds to an obvious failure such as a tool error, invalid or malformed action, repeated action, or a write that has no effect, and neutral otherwise. AREW uses these labels to perform within-trajectory advantage redistribution. **T3** uses the same signals for trajectory truncation; in our current Tau2Bench setup we use a conservative soft truncation policy with trunc_strength = 8 and set the hard truncation threshold to 999, which effectively disables hard truncation. See details in `verl/search_r1/tau2_adapter`.
 
-For the solo setting, we derive simple step-level signals directly from the online interaction trace: a step is labeled **positive** if it increases the number of matched expected actions in the benchmark evaluator, **negative** if it corresponds to an obvious failure such as a tool error, invalid or malformed action, repeated action, or a write that has no effect, and neutral otherwise. AREW uses these labels to perform within-trajectory advantage redistribution. **T3** uses the same signals for trajectory truncation; in our current Tau2Bench setup we use a conservative soft truncation policy with trunc_strength = 8 and set the hard truncation threshold to 999, which effectively disables hard truncation. See details in `verl/search_r1/tau2_adapter`.
-
-For Tau2-**standard**, we automatically derive weak step-level critiques from the interaction traces between the **agent, tools, and the LLM-simulated user**. **Positive** labels are assigned to steps that **uncover new information, advance task completion, or elicit informative user-side diagnostics**, while **negative** labels are assigned to **invalid, repetitive, or unproductive** behaviors. The resulting labels are transformed into token-level advantage modifiers and incorporated into PPO training as a lightweight auxiliary signal alongside the original outcome reward.
-
-Here are the main experimental results. Weclome to check more experimental analysis and implementation details in the source code and in our paper!
-
-**Solo mode: Comparing vanilla PPO with PPO equipped with T3**
-
-150 steps training on Qwen-2.5-7B
+For Tau2Bench standard mode, the agent-visible conversation follows the original benchmark semantics: the policy only sees user messages and assistant-side tool observations; hidden user-side tool calls and user-side tool results are used internally by the LLM-simulated user and are not exposed to the policy.
+**Comparing vanilla PPO with PPO equipped with T3**
 
 ![paper image](./figs/tau2-T3.png)
 
-**Solo mode: Comparing vanilla PPO with PPO equipped with AREW**
-
-150 steps training on Qwen-2.5-7B
+**Comparing vanilla PPO with PPO equipped with AREW**
 
 ![paper image](./figs/tau2-AREW.png)
-
-**Standard mdoe: Comparing vanilla PPO with PPO equipped with AREW**
-
-70 steps training on Qwen-2.5-14B
-
-![paper image](./figs/tau2s-AREW.png)
 
 ## Extending the Repository
 
@@ -336,21 +352,12 @@ For example, Tau2-style tasks are organized under `verl/search_r1/tau2_adapter/`
 
 ## Citation
 
-If you use this repository, please cite the T3 and AREW paper. If your use also depends on the underlying framework components, please additionally cite `verl`.
+If you use this repository, please cite the T3 paper. If your use also depends on the underlying framework components, please additionally cite `verl`.
 
 ```bibtex
 @inproceedings{zoureducing,
   title={Reducing Belief Deviation in Reinforcement Learning for Active Reasoning of LLM Agents},
   author={Zou, Deyu and Chen, Yongqiang and Wang, Jianxiang and YANG, Garry and Li, Mufei and Da, Qing and Cheng, James and Li, Pan and Gong, Yu},
   booktitle={The Fourteenth International Conference on Learning Representations}
-}
-```
-
-```
-@article{zou2026information,
-  title={On Information Self-Locking in Reinforcement Learning for Active Reasoning of LLM agents},
-  author={Zou, Deyu and Chen, Yongqiang and Feng, Fan and Li, Mufei and Li, Pan and Gong, Yu and Cheng, James},
-  journal={arXiv preprint arXiv:2603.12109},
-  year={2026}
 }
 ```

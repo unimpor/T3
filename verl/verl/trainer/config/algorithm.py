@@ -83,6 +83,13 @@ class AlgoConfig(BaseConfig):
     kl_penalty: str = "kl"
     kl_ctrl: KLControlConfig = field(default_factory=KLControlConfig)
     use_arew_bonus: bool = False
+    as_bonus: bool = False
+    bt_bonus: bool = False
+    as_cf: bool = False
+    bt_cf: bool = False
+    bonus_mode: Optional[str] = None
+    bonus_scale: Optional[float] = None
+    btv: str = "v1"
     arew_bonus_mode: str = "minority_fixed"
     arew_bonus_scale: float = 0.1
     arew_start_step: int = 0

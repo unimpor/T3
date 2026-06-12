@@ -353,6 +353,62 @@ def _extract_guess(guess, target_num):
     return np.array(numbers, dtype=float)
 
 
+def _extract_guess_any(guess):
+    numbers = re.findall(r'([\d\.]+)', guess)
+    assert len(numbers) > 0, "Expected a non-empty vector."
+    assert all(float(k) >= 0 for k in numbers), f"All guess must be positive. Ouput {numbers}"
+    return np.array(numbers, dtype=float)
+
+
+def _target_index(target):
+    if hasattr(target, "item"):
+        target = target.item()
+    ans_maps = {
+        'A': 0,
+        'B': 1,
+        'C': 2,
+        'D': 3,
+    }
+    if isinstance(target, str):
+        target = target.strip()
+        if target in ans_maps:
+            return ans_maps[target]
+        return int(target)
+    return int(target)
+
+
+def compute_pe_g(responses_str, ground_truths):
+    return compute_sim(responses_str, ground_truths)
+
+
+def compute_pe_f(responses_str, ground_truths):
+    return compute_sim(responses_str, ground_truths)
+
+
+def compute_score_multi_opt(responses_str, ground_truths):
+    target = ground_truths.get('target', ground_truths.get('answer_idx'))
+    answer = _target_index(target)
+
+    resp = extract_solution(responses_str)
+    if not resp:
+        return 0.
+
+    try:
+        pred = _extract_guess_any(resp)
+    except Exception as e:
+        print(e)
+        return 0.
+
+    if answer >= len(pred):
+        return 0.
+    max_indices = np.where(pred == np.max(pred))[0]
+    return 1. if len(max_indices) == 1 and max_indices[0] == answer else 0.
+
+
+def compute_score_multi_opt_int(responses_str, ground_truths):
+    return compute_score_multi_opt(responses_str, ground_truths)
+
+
 def compute_sim(responses_str, ground_truths):
     target = np.array(ground_truths['target'])
 
@@ -368,4 +424,3 @@ def compute_sim(responses_str, ground_truths):
     cos_sim = np.dot(pred, target) / (np.linalg.norm(pred) * np.linalg.norm(target))
     cos_sim = (cos_sim + 1) / 2
     return 1. if cos_sim > 0.94 else 0.
-

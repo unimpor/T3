@@ -16,6 +16,9 @@ defaults:
   # actor_rollout_ref.actor: trainer/config/actor/dp_actor.yaml
   - actor@actor_rollout_ref.actor: dp_actor
 
+  # npc.actor: trainer/config/actor/dp_actor.yaml
+  - actor@npc.actor: dp_actor
+
   # trainer.npu_profile: trainer/config/npu_profile/npu_profile.yaml
   - npu_profile@trainer.npu_profile: npu_profile
 
@@ -29,6 +32,9 @@ defaults:
   # Rollout model config.
   - rollout@actor_rollout_ref.rollout: rollout
 
+  # NPC rollout model config.
+  - rollout@npc.rollout: rollout
+
   # Critic model config.
   - critic@critic: dp_critic
 
@@ -38,6 +44,54 @@ defaults:
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
   - _self_
+
+# config for the optional interaction/user-simulator model
+npc:
+
+  # common configs for the NPC model
+  model:
+
+    # Huggingface model path. This can be either local path or HDFS path.
+    path: ~/models/deepseek-llm-7b-chat
+
+    # Additional Python packages to register huggingface models/tokenizers.
+    external_lib: null
+
+    # Used to override model's original configurations, mainly dropout
+    override_config: {}
+
+    # Enable gradient checkpointing for NPC model
+    enable_gradient_checkpointing: false
+
+    # Whether to remove padding tokens in inputs during rollout
+    use_remove_padding: false
+
+  # Rollout model config overrides for the NPC model.
+  rollout:
+
+    # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
+    enable_chunked_prefill: True
+
+    # Which loader to use for rollout model weights: dummy_dtensor, hf, megatron, etc.
+    load_format: dummy_dtensor
+
+    # for huge model, layered summon can save memory (prevent OOM) but make it slower
+    layered_summon: False
+
+  # profiler configs
+  profiler:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.utils.profiler.ProfilerConfig
+
+    # True for each task has its own database, False for all tasks in one training step share one database.
+    discrete: False
+
+    # Whether to profile all ranks.
+    all_ranks: False
+
+    # The ranks that will be profiled. [] or [0,1,...]
+    ranks: []
 
 # config for actor, rollout and reference model
 actor_rollout_ref:
@@ -162,6 +216,27 @@ algorithm:
 
   # Whether to enable AREW-style advantage bonus using per-step {-1,0,+1} labels
   use_arew_bonus: False
+
+  # Whether to label action-selection turns for AREW tasks
+  as_bonus: False
+
+  # Whether to label belief-tracking turns for AREW tasks
+  bt_bonus: False
+
+  # Whether to use MediQ counterfactual action-selection labels
+  as_cf: False
+
+  # Whether to use MediQ counterfactual belief-tracking labels
+  bt_cf: False
+
+  # Legacy AREW bonus mode used by PE-G/PE-F/MediQ/FloDial scripts
+  bonus_mode: null
+
+  # Legacy AREW bonus scale used by PE-G/PE-F/MediQ/FloDial scripts
+  bonus_scale: null
+
+  # FloDial belief-tracking label variant
+  btv: v1
 
   # How to convert AREW labels into zero-sum advantage bonus
   arew_bonus_mode: minority_fixed

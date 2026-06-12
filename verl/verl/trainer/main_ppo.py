@@ -35,8 +35,17 @@ from verl.utils.import_utils import load_extern_type
 
 
 def _select_rm_score_fn(data_source):
+    data_source = str(data_source).lower()
 
-    if 'cd' in data_source:
+    if 'pe-g' in data_source or 'pe_g' in data_source:
+        return qa_em.compute_pe_g
+    elif 'pe-f' in data_source or 'pe_f' in data_source:
+        return qa_em.compute_pe_f
+    elif 'mediq' in data_source or 'medq' in data_source or 'med_q' in data_source:
+        return qa_em.compute_score_multi_opt
+    elif 'flodial' in data_source or 'flo_dial' in data_source:
+        return qa_em.compute_score_multi_opt_int
+    elif 'cd' in data_source:
         return qa_em.compute_circuit_accuracy
     elif 'mr' in data_source:
         if 'variant' in data_source:
@@ -280,6 +289,8 @@ class TaskRunner:
             Role.ActorRollout: ray.remote(actor_rollout_cls),
             Role.Critic: ray.remote(CriticWorker),
         }
+        if config.get("use_interactions", False):
+            role_worker_mapping[Role.Interaction] = ray.remote(actor_rollout_cls)
 
         # Define the resource pool specification.
         # Map roles to the resource pool.
@@ -291,6 +302,8 @@ class TaskRunner:
             Role.ActorRollout: global_pool_id,
             Role.Critic: global_pool_id,
         }
+        if config.get("use_interactions", False):
+            mapping[Role.Interaction] = global_pool_id
 
         # We should adopt a multi-source reward function here:
         # - for rule-based rm, we directly call a reward score
